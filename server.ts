@@ -9,12 +9,12 @@ app.use(express.json());
 
 const PORT = 3001;
 
-// ─── Salesforce config ───────────────────────────────────────────
+// ─── Salesforce config (supports both SF_ and SALESFORCE_ env var names) ───
 const SF_LOGIN_URL =
-  process.env.SF_INSTANCE_URL || "https://login.salesforce.com";
-const SF_CLIENT_ID = process.env.SF_CLIENT_ID!;
-const SF_CLIENT_SECRET = process.env.SF_CLIENT_SECRET!;
-const SF_AGENT_ID = process.env.SF_AGENT_ID!;
+  process.env.SF_INSTANCE_URL || process.env.SALESFORCE_ORG_URL || "https://login.salesforce.com";
+const SF_CLIENT_ID = (process.env.SF_CLIENT_ID || process.env.SALESFORCE_CLIENT_ID)!;
+const SF_CLIENT_SECRET = (process.env.SF_CLIENT_SECRET || process.env.SALESFORCE_CLIENT_SECRET)!;
+const SF_AGENT_ID = (process.env.SF_AGENT_ID || process.env.AGENT_ID)!;
 
 // ─── Token cache ─────────────────────────────────────────────────
 let cachedToken: string | null = null;
