@@ -282,7 +282,20 @@ app.get("/api/health", async (_req, res) => {
   res.json({
     status: "ok",
     hasConfig,
+    loginUrl: SF_LOGIN_URL || "not set",
     agentId: SF_AGENT_ID ? `${SF_AGENT_ID.substring(0, 8)}...` : "not set",
+    clientIdSet: !!SF_CLIENT_ID,
+    clientSecretSet: !!SF_CLIENT_SECRET,
+    envSource: {
+      SF_INSTANCE_URL: !!process.env.SF_INSTANCE_URL,
+      SALESFORCE_ORG_URL: !!process.env.SALESFORCE_ORG_URL,
+      SF_CLIENT_ID: !!process.env.SF_CLIENT_ID,
+      SALESFORCE_CLIENT_ID: !!process.env.SALESFORCE_CLIENT_ID,
+      SF_CLIENT_SECRET: !!process.env.SF_CLIENT_SECRET,
+      SALESFORCE_CLIENT_SECRET: !!process.env.SALESFORCE_CLIENT_SECRET,
+      SF_AGENT_ID: !!process.env.SF_AGENT_ID,
+      AGENT_ID: !!process.env.AGENT_ID,
+    },
   });
 });
 
