@@ -233,12 +233,12 @@ app.delete("/api/agent/session", async (req, res) => {
 /**
  * GET /api/menu
  * Fetch menu items from Salesforce.
- * Queries the QSR_Menu_Item__c custom object.
+ * Queries the Menu_Item__c custom object with Menu_Category__r relationship.
  */
 app.get("/api/menu", async (_req, res) => {
   try {
     const query = encodeURIComponent(
-      "SELECT Id, Name, Price__c, Description__c, Category__c, Calories__c, Is_Available__c FROM QSR_Menu_Item__c WHERE Is_Available__c = true ORDER BY Category__c, Name"
+      "SELECT Id, Name, Price__c, Description__c, Calories__c, Is_Popular__c, Is_Available__c, Customizations__c, Menu_Category__r.Name FROM Menu_Item__c WHERE Is_Available__c = true ORDER BY Menu_Category__r.Sort_Order__c, Is_Popular__c DESC, Name ASC"
     );
 
     const sfRes = await sfFetch(
@@ -248,7 +248,7 @@ app.get("/api/menu", async (_req, res) => {
     if (!sfRes.ok) {
       const err = await sfRes.text();
       console.error("[menu] Query failed:", sfRes.status, err);
-      // Fallback to static menu if custom object doesn't exist
+      // Fallback to static menu if query fails
       return res.json({ items: getStaticMenu(), source: "static" });
     }
 
@@ -258,9 +258,11 @@ app.get("/api/menu", async (_req, res) => {
       name: r.Name,
       price: r.Price__c,
       description: r.Description__c,
-      category: r.Category__c,
+      category: r.Menu_Category__r?.Name || "Other",
       calories: r.Calories__c,
+      isPopular: r.Is_Popular__c || false,
       available: r.Is_Available__c,
+      customizations: r.Customizations__c ? JSON.parse(r.Customizations__c) : null,
     }));
 
     return res.json({ items, source: "salesforce" });
@@ -284,81 +286,35 @@ app.get("/api/health", async (_req, res) => {
   });
 });
 
-// ─── Static menu fallback ────────────────────────────────────────
+// ─── Static menu fallback (mirrors actual Salesforce Menu_Item__c data) ───
 function getStaticMenu() {
   return [
-    {
-      id: "static-1",
-      name: "Classic Fresh Burger",
-      price: 12.99,
-      description: "Grass-fed beef patty with fresh lettuce, tomato, and house-made sauce on a brioche bun.",
-      category: "Burgers",
-      calories: 650,
-      available: true,
-    },
-    {
-      id: "static-2",
-      name: "Grilled Chicken Wrap",
-      price: 10.99,
-      description: "Herb-marinated chicken breast with avocado, spinach, and chipotle aioli in a whole wheat wrap.",
-      category: "Wraps",
-      calories: 480,
-      available: true,
-    },
-    {
-      id: "static-3",
-      name: "Harvest Power Bowl",
-      price: 13.49,
-      description: "Quinoa, roasted sweet potato, chickpeas, kale, and tahini dressing.",
-      category: "Bowls",
-      calories: 520,
-      available: true,
-    },
-    {
-      id: "static-4",
-      name: "Wild-Caught Salmon Plate",
-      price: 16.99,
-      description: "Pan-seared salmon with seasonal vegetables and lemon herb rice.",
-      category: "Entrees",
-      calories: 580,
-      available: true,
-    },
-    {
-      id: "static-5",
-      name: "Garden Fresh Salad",
-      price: 9.49,
-      description: "Mixed greens, cherry tomatoes, cucumber, red onion, and balsamic vinaigrette.",
-      category: "Salads",
-      calories: 280,
-      available: true,
-    },
-    {
-      id: "static-6",
-      name: "Fresh Passion Fruit Spritz",
-      price: 5.99,
-      description: "Sparkling water with fresh passion fruit, mint, and a splash of lime.",
-      category: "Beverages",
-      calories: 90,
-      available: true,
-    },
-    {
-      id: "static-7",
-      name: "Sweet Potato Fries",
-      price: 5.49,
-      description: "Crispy hand-cut sweet potato fries with rosemary sea salt.",
-      category: "Sides",
-      calories: 340,
-      available: true,
-    },
-    {
-      id: "static-8",
-      name: "Açaí Energy Bowl",
-      price: 11.99,
-      description: "Blended açaí with banana, granola, coconut flakes, and fresh berries.",
-      category: "Bowls",
-      calories: 410,
-      available: true,
-    },
+    // Burgers
+    { id: "s-1", name: "Classic Fresh Burger", price: 12.99, description: "Our signature quarter-pound beef patty with fresh lettuce, tomato, pickles, and our house-made sauce on a toasted brioche bun.", category: "Burgers", calories: 650, isPopular: true, available: true },
+    { id: "s-2", name: "Crispy Chicken Sandwich", price: 13.49, description: "Crispy buttermilk-fried chicken breast with coleslaw, pickles, and spicy mayo on a toasted bun.", category: "Burgers", calories: 720, isPopular: true, available: true },
+    { id: "s-3", name: "Double Stack Burger", price: 15.99, description: "Two quarter-pound patties stacked high with double cheese, caramelized onions, and smoky BBQ sauce.", category: "Burgers", calories: 950, isPopular: true, available: true },
+    { id: "s-4", name: "Veggie Garden Burger", price: 11.99, description: "House-made plant-based patty with roasted peppers, arugula, and herb aioli. Fresh, wholesome, and delicious.", category: "Burgers", calories: 480, isPopular: false, available: true },
+    // Steaks & Grills
+    { id: "s-5", name: "Grilled Filet Mignon", price: 24.99, description: "Premium 8oz filet mignon grilled to your liking, served with herb butter and fresh-cut fries.", category: "Steaks & Grills", calories: 680, isPopular: true, available: true },
+    { id: "s-6", name: "Herb-Crusted Ribeye", price: 22.99, description: "12oz ribeye with a rosemary-garlic crust, served with roasted vegetables.", category: "Steaks & Grills", calories: 850, isPopular: false, available: true },
+    { id: "s-7", name: "BBQ Grilled Chicken", price: 16.99, description: "Juicy half chicken basted in our house-made BBQ sauce, slow-grilled over open flame.", category: "Steaks & Grills", calories: 620, isPopular: true, available: true },
+    // Pasta & Bowls
+    { id: "s-8", name: "Carbonara", price: 14.99, description: "Classic spaghetti carbonara with crispy pancetta, parmesan, egg yolk, and cracked black pepper.", category: "Pasta & Bowls", calories: 780, isPopular: true, available: true },
+    { id: "s-9", name: "Grilled Chicken Bowl", price: 14.49, description: "Herb-marinated grilled chicken over quinoa with roasted vegetables, avocado, and lemon tahini dressing.", category: "Pasta & Bowls", calories: 550, isPopular: true, available: true },
+    { id: "s-10", name: "Penne Arrabbiata", price: 13.49, description: "Penne in a fiery tomato sauce with garlic, chili flakes, and fresh basil.", category: "Pasta & Bowls", calories: 620, isPopular: false, available: true },
+    // Sides
+    { id: "s-11", name: "Fresh-Cut Fries", price: 4.49, description: "Hand-cut fries, crispy on the outside, fluffy inside. Seasoned with sea salt.", category: "Sides", calories: 380, isPopular: true, available: true },
+    { id: "s-12", name: "Sweet Potato Fries", price: 5.49, description: "Crispy sweet potato fries served with chipotle aioli dipping sauce.", category: "Sides", calories: 340, isPopular: false, available: true },
+    { id: "s-13", name: "Onion Rings", price: 5.49, description: "Beer-battered onion rings, golden and crunchy, served with ranch dipping sauce.", category: "Sides", calories: 420, isPopular: false, available: true },
+    { id: "s-14", name: "Garden Salad", price: 6.99, description: "Mixed greens, cherry tomatoes, cucumber, red onion, and croutons with your choice of dressing.", category: "Sides", calories: 180, isPopular: false, available: true },
+    // Fresh Juices & Drinks
+    { id: "s-15", name: "Fresh Lemonade", price: 4.99, description: "Hand-squeezed lemon juice with just the right amount of sweetness. Served ice cold.", category: "Fresh Juices & Drinks", calories: 120, isPopular: true, available: true },
+    { id: "s-16", name: "Tropical Mango Smoothie", price: 5.99, description: "Creamy mango, banana, and coconut milk blended to tropical perfection.", category: "Fresh Juices & Drinks", calories: 280, isPopular: true, available: true },
+    { id: "s-17", name: "Berry Blast Smoothie", price: 5.49, description: "A vibrant mix of strawberries, blueberries, raspberries, and Greek yogurt.", category: "Fresh Juices & Drinks", calories: 220, isPopular: false, available: true },
+    { id: "s-18", name: "Green Detox Juice", price: 6.99, description: "A revitalizing blend of kale, cucumber, celery, green apple, and fresh ginger.", category: "Fresh Juices & Drinks", calories: 90, isPopular: false, available: true },
+    // Desserts
+    { id: "s-19", name: "Chocolate Brownie", price: 5.99, description: "Rich, fudgy chocolate brownie baked fresh daily. Served warm with a scoop of vanilla ice cream.", category: "Desserts", calories: 480, isPopular: true, available: true },
+    { id: "s-20", name: "Fresh Fruit Cup", price: 4.99, description: "A colorful mix of seasonal fresh fruits — strawberries, blueberries, mango, and kiwi.", category: "Desserts", calories: 120, isPopular: false, available: true },
   ];
 }
 

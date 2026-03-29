@@ -44,9 +44,9 @@ export const Orders: React.FC<OrdersProps> = ({ onStartVoice }) => {
         <h3 className="font-headline text-xl font-bold text-on-surface/60 uppercase tracking-widest text-center">Try saying...</h3>
         {[
           "Show me the menu",
-          "I'd like to order a burger",
+          "I'd like a Classic Fresh Burger with bacon",
+          "Can I get a Grilled Chicken Bowl?",
           "Check my loyalty points",
-          "What's the status of my order?",
         ].map((suggestion, i) => (
           <motion.div
             key={i}

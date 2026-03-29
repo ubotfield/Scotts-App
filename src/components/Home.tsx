@@ -32,7 +32,7 @@ export const Home: React.FC<HomeProps> = ({ onNavigate }) => {
         >
           <div className="relative z-10 w-full md:w-1/2 space-y-4">
             <h3 className="font-headline text-3xl font-black uppercase tracking-tight">Start New Order</h3>
-            <p className="text-on-surface/70 font-bold">Explore our fresh menu designed for your feel-good lifestyle.</p>
+            <p className="text-on-surface/70 font-bold">Fresh burgers, grilled steaks, bowls, and more — made to order.</p>
             <div className="flex items-center gap-2 font-headline font-bold text-primary uppercase tracking-widest text-sm">
               <span>Browse Menu</span>
               <ArrowRight size={18} />
