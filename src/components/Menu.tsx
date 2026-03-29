@@ -32,7 +32,7 @@ const ITEM_IMAGES: Record<string, string> = {
   'Classic Fresh Burger': 'https://images.unsplash.com/photo-1568901346375-23c9450c58cd?auto=format&fit=crop&q=80&w=400',
   'Crispy Chicken Sandwich': 'https://images.unsplash.com/photo-1606755962773-d324e0a13086?auto=format&fit=crop&q=80&w=400',
   'Double Stack Burger': 'https://images.unsplash.com/photo-1553979459-d2229ba7433b?auto=format&fit=crop&q=80&w=400',
-  'Veggie Garden Burger': 'https://images.unsplash.com/photo-1520072959219-c595e6cdc07a?auto=format&fit=crop&q=80&w=400',
+  'Veggie Garden Burger': 'https://images.unsplash.com/photo-1525059696034-4967a8e1dca2?auto=format&fit=crop&q=80&w=400',
   'Grilled Filet Mignon': 'https://images.unsplash.com/photo-1558030006-450675393462?auto=format&fit=crop&q=80&w=400',
   'Herb-Crusted Ribeye': 'https://images.unsplash.com/photo-1544025162-d76694265947?auto=format&fit=crop&q=80&w=400',
   'BBQ Grilled Chicken': 'https://images.unsplash.com/photo-1532550907401-a500c9a57435?auto=format&fit=crop&q=80&w=400',
