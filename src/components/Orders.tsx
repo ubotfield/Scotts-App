@@ -1,71 +1,72 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { History, AudioLines, ChevronRight, Mic } from 'lucide-react';
+import { Mic, ReceiptText, AudioLines, ChevronRight } from 'lucide-react';
 
-const ORDERS = [
-  {
-    id: 1,
-    date: "Oct 24, 2023 • 12:45 PM",
-    title: "Spicy Umami Bowl & Matcha",
-    price: 24.50,
-    items: 2,
-    status: "Delivered to Home",
-    favorite: true
-  },
-  {
-    id: 2,
-    date: "Oct 18, 2023 • 7:20 PM",
-    title: "Double Smashburger",
-    price: 18.90,
-    items: 1,
-    status: "Delivered to Office"
-  }
-];
+interface OrdersProps {
+  onStartVoice: () => void;
+}
 
-export const Orders: React.FC = () => {
+export const Orders: React.FC<OrdersProps> = ({ onStartVoice }) => {
   return (
     <div className="space-y-10">
       <section className="space-y-2">
         <h2 className="font-headline text-4xl font-extrabold tracking-tight">Orders</h2>
-        <p className="text-on-surface/70 font-medium">Relive your delicious moments.</p>
+        <p className="text-on-surface/70 font-medium">Track and manage your orders.</p>
       </section>
 
-      <div className="space-y-6">
-        {ORDERS.map((order) => (
-          <motion.div 
-            key={order.id}
-            whileHover={{ scale: 1.01 }}
-            className="bg-surface-container-high rounded-xl p-6 relative overflow-hidden border border-primary/5"
+      {/* Voice ordering prompt */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="bg-primary-container rounded-2xl p-8 text-center space-y-6"
+      >
+        <div className="w-20 h-20 bg-primary/10 rounded-full flex items-center justify-center mx-auto">
+          <AudioLines size={40} className="text-primary" />
+        </div>
+        <div className="space-y-2">
+          <h3 className="font-headline text-2xl font-black text-on-surface">Order with Your Voice</h3>
+          <p className="text-on-surface/70 font-medium max-w-md mx-auto">
+            Use our AI voice assistant to place orders, check loyalty points, and track your meals — all hands-free.
+          </p>
+        </div>
+        <button
+          onClick={onStartVoice}
+          className="bg-primary text-on-primary font-headline font-bold py-4 px-8 rounded-full flex items-center justify-center gap-3 transition-all hover:brightness-110 mx-auto shadow-lg shadow-primary/25"
+        >
+          <Mic size={20} fill="currentColor" />
+          <span>Start Voice Order</span>
+          <ChevronRight size={18} />
+        </button>
+      </motion.div>
+
+      {/* Empty state with tips */}
+      <div className="space-y-4">
+        <h3 className="font-headline text-xl font-bold text-on-surface/60 uppercase tracking-widest text-center">Try saying...</h3>
+        {[
+          "Show me the menu",
+          "I'd like to order a burger",
+          "Check my loyalty points",
+          "What's the status of my order?",
+        ].map((suggestion, i) => (
+          <motion.div
+            key={i}
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: i * 0.1 }}
+            className="bg-surface-container-high rounded-xl p-5 border border-primary/5 flex items-center gap-4 cursor-pointer hover:bg-surface-container-highest transition-colors"
+            onClick={onStartVoice}
           >
-            <div className="flex justify-between items-start mb-4">
-              <div>
-                <span className="font-headline text-xs font-bold uppercase tracking-widest text-primary mb-1 block">{order.date}</span>
-                <h3 className="font-headline text-xl font-bold">{order.title}</h3>
-              </div>
-              <span className="font-headline font-black text-xl">${order.price.toFixed(2)}</span>
+            <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
+              <Mic size={16} className="text-primary" />
             </div>
-            
-            <div className="flex gap-4 mb-6">
-              <div className="text-sm text-on-surface/70 font-medium">{order.items} items • {order.status}</div>
-            </div>
-
-            <button className="w-full bg-primary text-on-primary font-headline font-bold py-4 rounded-full flex items-center justify-center gap-3 transition-all hover:brightness-110">
-              <AudioLines size={20} fill="currentColor" />
-              <span>Quick Re-order with Voice</span>
-              <ChevronRight size={18} />
-            </button>
-
-            {order.favorite && (
-              <div className="absolute -top-2 -right-2 bg-secondary-container text-on-secondary-container font-headline text-[10px] font-black px-3 py-1 rounded-full rotate-12 shadow-sm uppercase tracking-tighter">
-                Favorite
-              </div>
-            )}
+            <span className="text-on-surface font-medium italic">"{suggestion}"</span>
           </motion.div>
         ))}
       </div>
 
       <div className="mt-12 text-center p-8 border-2 border-dashed border-primary/20 rounded-xl">
-        <p className="text-on-surface/60 font-medium italic">"The secret ingredient is always a repeat order."</p>
+        <ReceiptText size={32} className="mx-auto text-on-surface/30 mb-3" />
+        <p className="text-on-surface/60 font-medium italic">"Your order history will appear here after your first order."</p>
       </div>
     </div>
   );

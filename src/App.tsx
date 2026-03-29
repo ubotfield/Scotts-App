@@ -15,9 +15,9 @@ export default function App() {
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'home': return <Home />;
-      case 'menu': return <Menu />;
-      case 'orders': return <Orders />;
+      case 'home': return <Home onNavigate={(tab: Tab) => setActiveTab(tab)} />;
+      case 'menu': return <Menu onStartVoice={() => setIsVoiceActive(true)} />;
+      case 'orders': return <Orders onStartVoice={() => setIsVoiceActive(true)} />;
       case 'profile': return <Profile />;
     }
   };
@@ -33,10 +33,10 @@ export default function App() {
           <h1 className="font-headline font-bold text-2xl tracking-tight text-primary italic">Scott's Kitchen</h1>
         </div>
         <div className="w-10 h-10 rounded-full bg-surface-container-high overflow-hidden border-2 border-primary">
-          <img 
-            alt="User" 
-            className="w-full h-full object-cover" 
-            src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=100" 
+          <img
+            alt="User"
+            className="w-full h-full object-cover"
+            src="https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&q=80&w=100"
           />
         </div>
       </header>
@@ -57,9 +57,9 @@ export default function App() {
       </main>
 
       {/* Voice Assistant Overlay */}
-      <VoiceAssistant 
-        isActive={isVoiceActive} 
-        onToggle={() => setIsVoiceActive(!isVoiceActive)} 
+      <VoiceAssistant
+        isActive={isVoiceActive}
+        onToggle={() => setIsVoiceActive(!isVoiceActive)}
       />
 
       {/* Floating Voice Button (Mobile) */}
@@ -87,8 +87,8 @@ export default function App() {
             key={tab.id}
             onClick={() => setActiveTab(tab.id as Tab)}
             className={`flex flex-col items-center justify-center px-5 py-2 rounded-full transition-all duration-300 ${
-              activeTab === tab.id 
-                ? 'bg-primary text-on-primary scale-110' 
+              activeTab === tab.id
+                ? 'bg-primary text-on-primary scale-110'
                 : 'text-on-surface opacity-60 hover:bg-on-surface/5'
             }`}
           >
