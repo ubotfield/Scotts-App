@@ -1,0 +1,7 @@
+{
+  "name": "Scott's Kitchen New Remix UB",
+  "description": "A voice-powered quick-serve restaurant ordering app featuring real-time AI conversations.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

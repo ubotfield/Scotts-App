@@ -1,0 +1,64 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400;1,500;1,600;1,700;1,800&family=Be+Vietnam+Pro:wght@300;400;500;600&display=swap');
+
+@theme {
+  --font-headline: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Be Vietnam Pro", ui-sans-serif, system-ui, sans-serif;
+
+  --color-primary: #b80e1e;
+  --color-primary-dim: #a40017;
+  --color-on-primary: #ffefed;
+  --color-primary-container: #ff766f;
+  
+  --color-surface: #fff4f3;
+  --color-on-surface: #342d2d;
+  
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #fffaf9;
+  --color-surface-container: #fff4f3;
+  --color-surface-container-high: #fceceb;
+  --color-surface-container-highest: #f7e2e0;
+
+  --color-secondary-container: #ffc791;
+  --color-on-secondary-container: #4a2800;
+  
+  --color-tertiary: #BECE5A;
+  --color-tertiary-dim: #d8e971;
+
+  --radius-xl: 3rem;
+}
+
+@layer base {
+  body {
+    @apply bg-surface text-on-surface font-body;
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-headline;
+  }
+}
+
+.glass-panel {
+  background: rgba(255, 244, 243, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 0.5; }
+  100% { transform: scale(1.2); opacity: 0; }
+}
+
+.voice-pulse {
+  /* No position: relative here to avoid overriding 'fixed' or 'absolute' on the parent */
+}
+
+.voice-pulse::before {
+  content: '';
+  position: absolute;
+  inset: -10px;
+  border-radius: 9999px;
+  background: var(--color-tertiary-dim);
+  opacity: 0.3;
+  animation: pulse-ring 2s infinite;
+}
