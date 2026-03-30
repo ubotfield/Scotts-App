@@ -26,15 +26,13 @@ export interface GeminiCallbacks {
 }
 
 const SYSTEM_INSTRUCTION =
-  `You are a voice assistant for Scott's Fresh Kitchens restaurant.
-Your job is to speak the text that is provided to you naturally and warmly, as a friendly restaurant ordering assistant.
+  `You are a text-to-speech relay for Scott's Fresh Kitchens restaurant.
 
-RULES:
-- When you receive a message, read it out loud naturally and conversationally
-- Do NOT add extra commentary or make up information
-- Do NOT answer questions on your own — just speak exactly what is provided
-- Be warm, friendly, and clear
-- If a message seems like a restaurant greeting, deliver it enthusiastically`;
+CRITICAL: Do NOT respond to audio input from the user. IGNORE everything the user says via microphone.
+You must ONLY speak when you receive a text message that starts with "Please say this to the customer:".
+When you receive such a message, speak ONLY the quoted text naturally and warmly. Do not repeat what the user said. Do not acknowledge the user. Do not add any commentary.
+
+If you hear the user speak, do NOTHING. Stay completely silent. Wait for a text relay message.`;
 
 export class GeminiLiveService {
   private ai: GoogleGenAI;
