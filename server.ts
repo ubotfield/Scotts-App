@@ -10,7 +10,8 @@ dotenv.config({ path: ".env.local" });
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.raw({ type: "audio/*", limit: "10mb" }));
 
 // ─── CORS (needed for AI Studio iframe serving) ─────────────────
 app.use((req, res, next) => {
@@ -185,6 +186,7 @@ app.post("/api/agent/message", async (req, res) => {
   }
 
   try {
+    const agentStart = Date.now();
     const sfRes = await sfFetch(
       `/einstein/ai-agent/v1/sessions/${sessionId}/messages?sync=true`,
       {
@@ -225,7 +227,7 @@ app.post("/api/agent/message", async (req, res) => {
       responseText = data.text;
     }
 
-    console.log("[message] Agent response:", responseText.substring(0, 100) + "...");
+    console.log(`[message] Agent responded in ${Date.now() - agentStart}ms:`, responseText.substring(0, 100) + "...");
     return res.json({ response: responseText, raw: data });
   } catch (err: any) {
     console.error("[message] Error:", err.message);
@@ -337,6 +339,7 @@ app.post("/api/tts", async (req, res) => {
   }
 
   try {
+    const ttsStart = Date.now();
     // Use Gemini TTS model (dedicated TTS, not general-purpose)
     const apiRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
@@ -348,7 +351,7 @@ app.post("/api/tts", async (req, res) => {
             {
               parts: [
                 {
-                  text: `Say cheerfully: ${text}`,
+                  text: text,
                 },
               ],
             },
@@ -364,6 +367,7 @@ app.post("/api/tts", async (req, res) => {
         }),
       }
     );
+    console.log(`[tts] Gemini API call took ${Date.now() - ttsStart}ms`);
 
     if (!apiRes.ok) {
       const errText = await apiRes.text();
@@ -393,6 +397,70 @@ app.post("/api/tts", async (req, res) => {
     return res.send(wavBuffer);
   } catch (err: any) {
     console.error("[tts] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/stt
+ * Speech-to-Text via Gemini REST API.
+ * Receives audio as base64 JSON ({ audio: string, mimeType: string })
+ * Returns: { text: string }
+ *
+ * Used as fallback when Web Speech API (SpeechRecognition) is unavailable
+ * (iOS Chrome, PWA standalone mode, WKWebView).
+ */
+app.post("/api/stt", async (req, res) => {
+  const { audio, mimeType } = req.body;
+  if (!audio) {
+    return res.status(400).json({ error: "audio (base64) is required" });
+  }
+
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_API_KEY) {
+    return res.status(503).json({ error: "STT not configured" });
+  }
+
+  try {
+    const sttStart = Date.now();
+    // Use Gemini Flash for audio transcription
+    const apiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mimeType || "audio/webm",
+                    data: audio,
+                  },
+                },
+                {
+                  text: "Transcribe this audio exactly. Return ONLY the spoken text, nothing else. If no speech is detected, return an empty string.",
+                },
+              ],
+            },
+          ],
+        }),
+      }
+    );
+
+    if (!apiRes.ok) {
+      const errText = await apiRes.text();
+      console.error("[stt] Gemini API failed:", apiRes.status, errText);
+      return res.status(502).json({ error: "STT failed" });
+    }
+
+    const data = await apiRes.json();
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    console.log(`[stt] Transcribed in ${Date.now() - sttStart}ms:`, text.substring(0, 100));
+    return res.json({ text });
+  } catch (err: any) {
+    console.error("[stt] Error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
