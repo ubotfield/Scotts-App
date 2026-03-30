@@ -54,6 +54,7 @@ export class GeminiLiveService {
       (typeof process !== "undefined" && process.env?.GEMINI_API_KEY) ||
       (import.meta as any).env?.VITE_GEMINI_API_KEY ||
       "";
+    console.log("[gemini] API key present:", !!apiKey, "length:", apiKey?.length || 0);
     if (!apiKey) {
       console.warn("[gemini] No GEMINI_API_KEY found — voice will be unavailable");
     }

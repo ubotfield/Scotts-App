@@ -131,13 +131,14 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           },
         });
       } catch (err: any) {
-        console.error("[voice] Failed to start:", err);
+        const errMsg = err?.message || err?.toString?.() || JSON.stringify(err) || "Unknown error";
+        console.error("[voice] Failed to start:", errMsg, err);
         setHasError(true);
         hasErrorRef.current = true;
         setIsConnecting(false);
         setIsActive(false);
         setVolume(0);
-        setStatus(err.message || "Failed to connect");
+        setStatus(errMsg.substring(0, 120));
       }
     }
   };
