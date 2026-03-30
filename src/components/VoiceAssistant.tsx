@@ -218,101 +218,91 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   return (
     <>
       {/* ─── Floating Mic Button ──────────────────────────────── */}
-      <div className="fixed bottom-32 right-6 z-50">
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={toggleAssistant}
-          disabled={isConnecting}
-          className={cn(
-            "relative w-20 h-20 rounded-full flex items-center justify-center shadow-2xl transition-colors duration-500",
-            isActive
-              ? "bg-primary text-on-primary"
-              : "bg-primary text-on-primary",
-            isConnecting && "opacity-50 cursor-not-allowed"
-          )}
-        >
-          {isActive && (
-            <div className="absolute inset-0 rounded-full voice-pulse bg-primary/30" />
-          )}
-          <Mic size={32} />
+      <AnimatePresence>
+        {!(isActive || isConnecting || hasError) && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.8 }}
+            className="fixed bottom-32 right-6 z-50"
+          >
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={toggleAssistant}
+              disabled={isConnecting}
+              className="relative w-20 h-20 rounded-full flex items-center justify-center shadow-2xl bg-primary text-on-primary"
+            >
+              <Mic size={32} />
+            </motion.button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-          {isConnecting && (
-            <motion.div
-              animate={{ rotate: 360 }}
-              transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-              className="absolute inset-0 border-4 border-white/30 border-t-white rounded-full"
-            />
-          )}
-        </motion.button>
-      </div>
-
-      {/* ─── Inline Status Bar (popup, not full-screen) ───────── */}
+      {/* ─── Voice Status Bar (replaces mic button when active) ─ */}
       <AnimatePresence>
         {(isActive || isConnecting || hasError) && (
           <motion.div
-            initial={{ opacity: 0, y: 20 }}
+            initial={{ opacity: 0, y: 40 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
+            exit={{ opacity: 0, y: 40 }}
             className={cn(
-              "fixed bottom-32 left-1/2 -translate-x-1/2 z-40 w-[90%] max-w-lg px-8 py-6 rounded-2xl shadow-2xl flex items-center justify-between border backdrop-blur-md",
+              "fixed bottom-28 left-4 right-4 z-50 px-5 py-4 rounded-2xl shadow-2xl flex items-center gap-3 border backdrop-blur-md",
               hasError
-                ? "border-red-500/50 bg-red-50/90"
-                : "border-primary/10 bg-surface/90"
+                ? "border-red-500/50 bg-red-50/95"
+                : "border-primary/10 bg-surface/95"
             )}
           >
-            <div className="flex items-center gap-4">
-              {/* Volume visualization bars */}
-              <div className="flex gap-1.5 items-end h-8">
-                {[...Array(5)].map((_, i) => (
-                  <motion.div
-                    key={i}
-                    animate={{
-                      height: isListening
-                        ? Math.max(8, volume * (15 + i * 10) + Math.random() * 5)
-                        : 8,
-                    }}
-                    transition={{
-                      type: "spring",
-                      stiffness: 300,
-                      damping: 20,
-                    }}
-                    className={cn(
-                      "w-1.5 rounded-full",
-                      hasError ? "bg-red-500" : "bg-primary"
-                    )}
-                  />
-                ))}
-              </div>
-
-              {/* Status text */}
-              <div className="flex-1 min-w-0">
-                <p
+            {/* Mic icon / volume bars */}
+            <div className="flex gap-1 items-end h-7 flex-shrink-0">
+              {[...Array(4)].map((_, i) => (
+                <motion.div
+                  key={i}
+                  animate={{
+                    height: isListening
+                      ? Math.max(6, volume * (12 + i * 8) + Math.random() * 4)
+                      : 6,
+                  }}
+                  transition={{
+                    type: "spring",
+                    stiffness: 300,
+                    damping: 20,
+                  }}
                   className={cn(
-                    "font-headline font-black text-sm uppercase tracking-widest",
-                    hasError
-                      ? "text-red-600 whitespace-normal"
-                      : "text-primary truncate"
+                    "w-1 rounded-full",
+                    hasError ? "bg-red-500" : "bg-primary"
                   )}
-                >
-                  {status}
-                </p>
-                <p className="text-xs text-on-surface/60 font-bold uppercase tracking-tighter truncate">
-                  {hasError
-                    ? "Tap Close to reset"
-                    : '"Order my usual morning fuel"'}
-                </p>
-              </div>
+                />
+              ))}
+            </div>
+
+            {/* Status text — takes remaining space */}
+            <div className="flex-1 min-w-0">
+              <p
+                className={cn(
+                  "font-headline font-black text-xs uppercase tracking-wider leading-tight",
+                  hasError
+                    ? "text-red-600"
+                    : "text-primary"
+                )}
+              >
+                {status}
+              </p>
+              <p className="text-[10px] text-on-surface/50 font-bold uppercase tracking-tight leading-tight mt-0.5">
+                {hasError
+                  ? "Tap to reset"
+                  : "Say your order"}
+              </p>
             </div>
 
             {/* Stop / Close button */}
             <button
               onClick={toggleAssistant}
               className={cn(
-                "px-6 py-2 rounded-full text-xs font-black uppercase tracking-widest transition-all flex-shrink-0",
+                "px-4 py-2 rounded-full text-xs font-black uppercase tracking-wider transition-all flex-shrink-0 whitespace-nowrap",
                 hasError
-                  ? "bg-red-500/10 text-red-600 hover:bg-red-500 hover:text-white"
-                  : "bg-primary/10 text-primary hover:bg-primary hover:text-on-primary"
+                  ? "bg-red-500 text-white"
+                  : "bg-primary text-on-primary"
               )}
             >
               {hasError ? "Close" : "Stop"}

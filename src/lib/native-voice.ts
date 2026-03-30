@@ -1,8 +1,8 @@
 /**
  * NativeVoiceService — Cross-platform voice with dual STT strategy:
  *
- *   Strategy A (Safari): Web Speech API (SpeechRecognition) — real-time, lowest latency
- *   Strategy B (Chrome/PWA/homescreen): MediaRecorder → server-side Gemini STT
+ *   Strategy A (Safari/Safari PWA): Web Speech API (SpeechRecognition)
+ *   Strategy B (Chrome/Chrome PWA/homescreen): MediaRecorder → server-side Gemini STT
  *
  * Both strategies share the same TTS pipeline:
  *   Server-side Gemini TTS → AudioContext / <audio> element / browser speechSynthesis
@@ -47,13 +47,9 @@ export class NativeVoiceService {
   // Strategy B: MediaRecorder + server STT
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
-  private silenceTimeout: number | null = null;
   private isRecording = false;
-  private recordingAnalyser: AnalyserNode | null = null;
   private silenceDetectionInterval: number | null = null;
-
-  // ── TTS prefetch ──────────────────────────────────────────────
-  private ttsPrefetchPromise: Promise<ArrayBuffer> | null = null;
+  private supportedMimeType: string = "audio/webm";
 
   get isConnected(): boolean {
     return this._isConnected;
@@ -113,14 +109,22 @@ export class NativeVoiceService {
         window.speechSynthesis.speak(warmup);
       }
 
+      // ── Detect supported MIME type for MediaRecorder ────────
+      if (this.sttMode === "media-recorder") {
+        this.supportedMimeType = this.getSupportedMimeType();
+        console.log("[native-voice] MediaRecorder MIME:", this.supportedMimeType);
+      }
+
       // ── Start listening based on STT strategy ───────────────
+      this.shouldRestart = true;
       if (this.sttMode === "speech-recognition") {
         this.setupRecognition();
-        this.shouldRestart = true;
-        this.recognition.start();
+        try {
+          this.recognition.start();
+        } catch (e) {
+          console.warn("[native-voice] Initial recognition.start() failed:", e);
+        }
       } else {
-        // MediaRecorder mode: start recording immediately
-        this.shouldRestart = true;
         this.startMediaRecording();
       }
 
@@ -141,7 +145,6 @@ export class NativeVoiceService {
 
   private restartRecognition(): void {
     if (this.sttMode !== "speech-recognition") {
-      // Wrong strategy — restart MediaRecorder instead
       this.restartMediaRecording();
       return;
     }
@@ -149,6 +152,7 @@ export class NativeVoiceService {
     setTimeout(() => {
       if (!this.shouldRestart || !this._isConnected) return;
 
+      // Try 1: start existing instance
       try {
         if (this.recognition) {
           console.log("[native-voice] Restarting recognition...");
@@ -159,13 +163,25 @@ export class NativeVoiceService {
         console.warn("[native-voice] recognition.start() failed, recreating:", err);
       }
 
+      // Try 2: recreate entirely (iOS WebKit often needs this after audio playback)
       try {
         this.setupRecognition();
         this.recognition?.start();
         console.log("[native-voice] Recognition recreated and started");
       } catch (err2) {
         console.error("[native-voice] Failed to recreate recognition:", err2);
-        this.callbacks.onStatusChange?.("Tap mic to retry");
+        // Try 3: one more attempt after a longer delay
+        setTimeout(() => {
+          if (!this.shouldRestart || !this._isConnected) return;
+          try {
+            this.setupRecognition();
+            this.recognition?.start();
+            console.log("[native-voice] Recognition started on retry");
+          } catch (err3) {
+            console.error("[native-voice] Final recognition attempt failed:", err3);
+            this.callbacks.onStatusChange?.("Tap mic to retry");
+          }
+        }, 1000);
       }
     }, 300);
   }
@@ -187,7 +203,9 @@ export class NativeVoiceService {
 
     this.recognition.onstart = () => {
       console.log("[native-voice] Recognition started");
-      this.callbacks.onStatusChange?.("Listening...");
+      if (this.shouldRestart) {
+        this.callbacks.onStatusChange?.("Listening...");
+      }
     };
 
     this.recognition.onresult = (event: any) => {
@@ -214,7 +232,7 @@ export class NativeVoiceService {
     };
 
     this.recognition.onend = () => {
-      console.log("[native-voice] Recognition ended");
+      console.log("[native-voice] Recognition ended, shouldRestart:", this.shouldRestart);
       if (this.shouldRestart && this._isConnected) {
         this.restartRecognition();
       }
@@ -225,22 +243,28 @@ export class NativeVoiceService {
   // Strategy B: MediaRecorder → Server-side STT
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * Start recording audio via MediaRecorder.
-   * Uses silence detection to know when the user stopped speaking,
-   * then sends the audio chunk to the server for transcription.
-   */
   private startMediaRecording(): void {
-    if (!this.mediaStream || !this.shouldRestart || !this._isConnected) return;
+    if (!this.mediaStream || !this._isConnected) {
+      console.warn("[native-voice] Cannot start recording: no stream or not connected");
+      return;
+    }
 
-    // Determine best supported MIME type
-    const mimeType = this.getSupportedMimeType();
-    console.log("[native-voice] MediaRecorder using MIME:", mimeType);
+    // Verify the media stream is still active
+    const tracks = this.mediaStream.getAudioTracks();
+    if (tracks.length === 0 || tracks[0].readyState !== "live") {
+      console.warn("[native-voice] Media stream tracks not live, cannot record");
+      this.callbacks.onStatusChange?.("Mic error — tap to retry");
+      return;
+    }
+
+    console.log("[native-voice] Starting MediaRecorder, MIME:", this.supportedMimeType);
 
     try {
       this.recordedChunks = [];
+
+      // Create a fresh MediaRecorder each time
       this.mediaRecorder = new MediaRecorder(this.mediaStream, {
-        mimeType,
+        mimeType: this.supportedMimeType,
         audioBitsPerSecond: 64000,
       });
 
@@ -251,71 +275,109 @@ export class NativeVoiceService {
       };
 
       this.mediaRecorder.onstop = () => {
+        console.log("[native-voice] MediaRecorder stopped, chunks:", this.recordedChunks.length);
         this.isRecording = false;
-        // Process the recorded audio
+
         if (this.recordedChunks.length > 0) {
-          const blob = new Blob(this.recordedChunks, { type: mimeType });
+          const blob = new Blob(this.recordedChunks, { type: this.supportedMimeType });
           this.recordedChunks = [];
-          // Only transcribe if the blob has meaningful audio (> 1KB)
-          if (blob.size > 1000) {
-            this.transcribeAudio(blob, mimeType);
+
+          // Only transcribe if blob has meaningful audio (> 2KB)
+          if (blob.size > 2000) {
+            console.log("[native-voice] Sending", Math.round(blob.size / 1024), "KB for transcription");
+            this.transcribeAudio(blob, this.supportedMimeType);
           } else {
-            console.log("[native-voice] Audio too short, skipping STT");
-            // Restart recording
-            if (this.shouldRestart && this._isConnected) {
-              this.startMediaRecording();
-            }
+            console.log("[native-voice] Audio too short (" + blob.size + " bytes), restarting");
+            this.scheduleMediaRestart();
           }
         } else {
-          // No data, restart recording
-          if (this.shouldRestart && this._isConnected) {
-            this.startMediaRecording();
-          }
+          console.log("[native-voice] No recorded data, restarting");
+          this.scheduleMediaRestart();
         }
       };
 
-      // Request data every 250ms for silence detection
+      this.mediaRecorder.onerror = (event: any) => {
+        console.error("[native-voice] MediaRecorder error:", event.error || event);
+        this.isRecording = false;
+        this.scheduleMediaRestart();
+      };
+
+      // Start recording with timeslice of 250ms
       this.mediaRecorder.start(250);
       this.isRecording = true;
       this.callbacks.onStatusChange?.("Listening...");
-      console.log("[native-voice] MediaRecorder started");
+      console.log("[native-voice] MediaRecorder started successfully");
 
       // Start silence detection
       this.startSilenceDetection();
-    } catch (err) {
-      console.error("[native-voice] MediaRecorder failed:", err);
-      this.callbacks.onStatusChange?.("Recording not supported");
-      this.callbacks.onError?.("MediaRecorder not available");
+    } catch (err: any) {
+      console.error("[native-voice] MediaRecorder creation failed:", err);
+      this.isRecording = false;
+      // Try without options as last resort
+      try {
+        this.mediaRecorder = new MediaRecorder(this.mediaStream);
+        this.supportedMimeType = this.mediaRecorder.mimeType || "audio/webm";
+        console.log("[native-voice] Retrying MediaRecorder with default MIME:", this.supportedMimeType);
+        this.mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) this.recordedChunks.push(event.data);
+        };
+        this.mediaRecorder.onstop = () => {
+          this.isRecording = false;
+          if (this.recordedChunks.length > 0) {
+            const blob = new Blob(this.recordedChunks, { type: this.supportedMimeType });
+            this.recordedChunks = [];
+            if (blob.size > 2000) {
+              this.transcribeAudio(blob, this.supportedMimeType);
+            } else {
+              this.scheduleMediaRestart();
+            }
+          } else {
+            this.scheduleMediaRestart();
+          }
+        };
+        this.mediaRecorder.start(250);
+        this.isRecording = true;
+        this.callbacks.onStatusChange?.("Listening...");
+        this.startSilenceDetection();
+      } catch (err2) {
+        console.error("[native-voice] MediaRecorder completely failed:", err2);
+        this.callbacks.onStatusChange?.("Voice not available");
+        this.callbacks.onError?.("Cannot record audio on this device");
+      }
     }
   }
 
   private getSupportedMimeType(): string {
+    // On iOS, audio/mp4 is most reliable
     const types = [
+      "audio/mp4",
       "audio/webm;codecs=opus",
       "audio/webm",
-      "audio/mp4",
       "audio/ogg;codecs=opus",
       "audio/ogg",
     ];
     for (const type of types) {
-      if (MediaRecorder.isTypeSupported(type)) {
-        return type;
+      try {
+        if (MediaRecorder.isTypeSupported(type)) {
+          return type;
+        }
+      } catch {
+        // isTypeSupported can throw in some browsers
       }
     }
-    return "audio/webm"; // fallback
+    return ""; // Let MediaRecorder choose default
   }
 
-  /**
-   * Monitor audio volume to detect when user stops speaking.
-   * After ~1.5s of silence following speech, stop recording and transcribe.
-   */
   private startSilenceDetection(): void {
     if (!this.volumeAnalyser) return;
 
+    // Stop any existing interval
+    this.stopSilenceDetection();
+
     const dataArray = new Uint8Array(this.volumeAnalyser.frequencyBinCount);
-    const SILENCE_THRESHOLD = 0.02; // Normalized 0-1
-    const SPEECH_THRESHOLD = 0.04;  // Must exceed this to count as speech
-    const SILENCE_DURATION = 1500;  // ms of silence before stopping
+    const SILENCE_THRESHOLD = 0.015;
+    const SPEECH_THRESHOLD = 0.03;
+    const SILENCE_DURATION = 1500;  // 1.5s of silence after speech
     const MAX_RECORDING = 15000;    // max 15s per chunk
 
     let hasSpeech = false;
@@ -333,17 +395,14 @@ export class NativeVoiceService {
       for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
       const volume = sum / dataArray.length / 255;
 
-      // Detect speech
       if (volume > SPEECH_THRESHOLD) {
         hasSpeech = true;
         silenceSince = null;
       } else if (volume < SILENCE_THRESHOLD && hasSpeech) {
-        // Silence after speech
         if (!silenceSince) {
           silenceSince = Date.now();
         } else if (Date.now() - silenceSince > SILENCE_DURATION) {
-          // User stopped speaking — stop recording for transcription
-          console.log("[native-voice] Silence detected after speech, stopping recording");
+          console.log("[native-voice] Silence detected after speech");
           this.stopSilenceDetection();
           this.stopMediaRecording();
           return;
@@ -367,41 +426,36 @@ export class NativeVoiceService {
   }
 
   private stopMediaRecording(): void {
-    if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
-      try {
+    try {
+      if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
         this.mediaRecorder.stop();
-      } catch (err) {
-        console.warn("[native-voice] MediaRecorder stop error:", err);
       }
+    } catch (err) {
+      console.warn("[native-voice] MediaRecorder stop error:", err);
+      this.isRecording = false;
     }
   }
 
-  private restartMediaRecording(): void {
+  /** Schedule a MediaRecorder restart with a short delay */
+  private scheduleMediaRestart(): void {
+    if (!this.shouldRestart || !this._isConnected) return;
     setTimeout(() => {
-      if (this.shouldRestart && this._isConnected && !this.isProcessing) {
+      if (this.shouldRestart && this._isConnected && !this.isProcessing && !this.isRecording) {
         this.startMediaRecording();
       }
     }, 300);
   }
 
-  /**
-   * Send recorded audio blob to server for transcription via Gemini.
-   */
+  private restartMediaRecording(): void {
+    this.scheduleMediaRestart();
+  }
+
   private async transcribeAudio(blob: Blob, mimeType: string): Promise<void> {
     this.callbacks.onStatusChange?.("Processing...");
 
     try {
       // Convert blob to base64
-      const arrayBuffer = await blob.arrayBuffer();
-      const bytes = new Uint8Array(arrayBuffer);
-      let binary = "";
-      // Process in chunks to avoid call stack issues
-      const chunkSize = 8192;
-      for (let i = 0; i < bytes.length; i += chunkSize) {
-        const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-        binary += String.fromCharCode.apply(null, chunk as any);
-      }
-      const base64 = btoa(binary);
+      const base64 = await this.blobToBase64(blob);
 
       console.log("[native-voice] Sending audio for STT:", Math.round(blob.size / 1024), "KB");
 
@@ -416,34 +470,39 @@ export class NativeVoiceService {
 
       if (!res.ok) {
         console.error("[native-voice] STT request failed:", res.status);
-        // Restart recording
-        if (this.shouldRestart && this._isConnected) {
-          this.restartMediaRecording();
-        }
+        this.scheduleMediaRestart();
         return;
       }
 
       const data = await res.json();
       const text = data.text?.trim();
 
-      if (text) {
+      if (text && text.length > 0) {
         console.log("[native-voice] STT result:", text);
-        // Route to agent (this will handle speaking and restarting recording)
         await this.routeToAgent(text);
       } else {
         console.log("[native-voice] No speech detected in audio");
-        // Restart recording
-        if (this.shouldRestart && this._isConnected) {
-          this.restartMediaRecording();
-        }
+        this.scheduleMediaRestart();
       }
     } catch (err) {
       console.error("[native-voice] Transcription error:", err);
-      // Restart recording
-      if (this.shouldRestart && this._isConnected) {
-        this.restartMediaRecording();
-      }
+      this.scheduleMediaRestart();
     }
+  }
+
+  /** Convert Blob to base64 string using FileReader (most compatible) */
+  private blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const dataUrl = reader.result as string;
+        // Strip the data URL prefix (e.g. "data:audio/mp4;base64,")
+        const base64 = dataUrl.split(",")[1] || "";
+        resolve(base64);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -457,11 +516,16 @@ export class NativeVoiceService {
 
     this.pauseListening();
     await this.speakText(greetingResponse);
+
+    // Small delay before resuming to let iOS audio system settle
+    await new Promise(r => setTimeout(r, 300));
     this.resumeListening();
   }
 
   private pauseListening(): void {
+    console.log("[native-voice] Pausing listening (mode:", this.sttMode + ")");
     this.shouldRestart = false;
+
     if (this.sttMode === "speech-recognition") {
       try { this.recognition?.stop(); } catch { /* ignore */ }
     } else {
@@ -471,23 +535,26 @@ export class NativeVoiceService {
   }
 
   private resumeListening(): void {
+    console.log("[native-voice] Resuming listening (mode:", this.sttMode + ")");
     this.shouldRestart = true;
     if (!this._isConnected) return;
 
-    console.log("[native-voice] Resuming listening...");
     this.callbacks.onStatusChange?.("Listening...");
 
     if (this.sttMode === "speech-recognition") {
+      // For Safari PWA: recreate recognition fresh after audio playback
       this.restartRecognition();
     } else {
-      this.restartMediaRecording();
+      // For MediaRecorder: start a new recording session
+      // Use direct call instead of scheduleMediaRestart to avoid isProcessing check
+      setTimeout(() => {
+        if (this.shouldRestart && this._isConnected && !this.isRecording) {
+          this.startMediaRecording();
+        }
+      }, 200);
     }
   }
 
-  /**
-   * Route user text to Agentforce, then speak the response.
-   * Optimized: starts TTS prefetch before Agentforce responds (for static phrases).
-   */
   private async routeToAgent(userText: string): Promise<void> {
     if (this.isProcessing) {
       console.log("[native-voice] Already processing, skipping:", userText);
@@ -511,14 +578,13 @@ export class NativeVoiceService {
           } catch (speakErr) {
             console.error("[native-voice] speakText failed:", speakErr);
           }
+          // Small delay before resuming
+          await new Promise(r => setTimeout(r, 300));
           this.resumeListening();
         } else {
           console.warn("[native-voice] Empty agent response");
           this.callbacks.onStatusChange?.("Listening...");
-          // For MediaRecorder mode, restart recording
-          if (this.sttMode === "media-recorder") {
-            this.restartMediaRecording();
-          }
+          this.scheduleMediaRestart();
         }
       }
     } catch (err: any) {
@@ -529,10 +595,11 @@ export class NativeVoiceService {
       } catch (speakErr) {
         console.error("[native-voice] Error speech failed too:", speakErr);
       }
+      await new Promise(r => setTimeout(r, 300));
       this.resumeListening();
     } finally {
       this.isProcessing = false;
-      console.log("[native-voice] Processing complete");
+      console.log("[native-voice] Processing complete, isProcessing:", this.isProcessing);
     }
   }
 
@@ -540,12 +607,6 @@ export class NativeVoiceService {
   // TTS: Server Gemini TTS with triple-fallback playback
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * Speak text using server-side TTS with triple-fallback:
-   *   1. Server TTS → AudioContext (pre-warmed)
-   *   2. Server TTS → <audio> HTML element (most iOS-compatible)
-   *   3. Browser speechSynthesis
-   */
   private async speakText(text: string): Promise<void> {
     try {
       console.log("[native-voice] Fetching TTS for:", text.substring(0, 60));
@@ -681,6 +742,7 @@ export class NativeVoiceService {
   }
 
   disconnect(): void {
+    console.log("[native-voice] Disconnecting...");
     this.shouldRestart = false;
     this._isConnected = false;
 
@@ -701,6 +763,7 @@ export class NativeVoiceService {
     this.stopMediaRecording();
     this.mediaRecorder = null;
     this.recordedChunks = [];
+    this.isRecording = false;
 
     // Stop mic
     if (this.mediaStream) {
@@ -710,9 +773,9 @@ export class NativeVoiceService {
     this.volumeAnalyser = null;
 
     // Close audio contexts
-    this.audioContext?.close();
+    try { this.audioContext?.close(); } catch { /* ignore */ }
     this.audioContext = null;
-    this.playbackContext?.close();
+    try { this.playbackContext?.close(); } catch { /* ignore */ }
     this.playbackContext = null;
 
     // Stop any browser TTS
