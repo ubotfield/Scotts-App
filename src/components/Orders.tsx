@@ -2,11 +2,7 @@ import React from 'react';
 import { motion } from 'motion/react';
 import { Mic, ReceiptText, AudioLines, ChevronRight } from 'lucide-react';
 
-interface OrdersProps {
-  onStartVoice: () => void;
-}
-
-export const Orders: React.FC<OrdersProps> = ({ onStartVoice }) => {
+export const Orders: React.FC = () => {
   return (
     <div className="space-y-10">
       <section className="space-y-2">
@@ -27,19 +23,12 @@ export const Orders: React.FC<OrdersProps> = ({ onStartVoice }) => {
           <h3 className="font-headline text-2xl font-black text-on-surface">Order with Your Voice</h3>
           <p className="text-on-surface/70 font-medium max-w-md mx-auto">
             Use our AI voice assistant to place orders, check loyalty points, and track your meals — all hands-free.
+            Tap the mic button to get started.
           </p>
         </div>
-        <button
-          onClick={onStartVoice}
-          className="bg-primary text-on-primary font-headline font-bold py-4 px-8 rounded-full flex items-center justify-center gap-3 transition-all hover:brightness-110 mx-auto shadow-lg shadow-primary/25"
-        >
-          <Mic size={20} fill="currentColor" />
-          <span>Start Voice Order</span>
-          <ChevronRight size={18} />
-        </button>
       </motion.div>
 
-      {/* Empty state with tips */}
+      {/* Suggestions */}
       <div className="space-y-4">
         <h3 className="font-headline text-xl font-bold text-on-surface/60 uppercase tracking-widest text-center">Try saying...</h3>
         {[
@@ -53,8 +42,7 @@ export const Orders: React.FC<OrdersProps> = ({ onStartVoice }) => {
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: i * 0.1 }}
-            className="bg-surface-container-high rounded-xl p-5 border border-primary/5 flex items-center gap-4 cursor-pointer hover:bg-surface-container-highest transition-colors"
-            onClick={onStartVoice}
+            className="bg-surface-container-high rounded-xl p-5 border border-primary/5 flex items-center gap-4"
           >
             <div className="w-8 h-8 bg-primary/10 rounded-full flex items-center justify-center flex-shrink-0">
               <Mic size={16} className="text-primary" />

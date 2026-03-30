@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { Mic, Loader2, Star, Flame } from 'lucide-react';
+import { Loader2, Flame } from 'lucide-react';
 
 interface MenuItem {
   id: string;
@@ -11,10 +11,6 @@ interface MenuItem {
   calories?: number;
   isPopular?: boolean;
   available?: boolean;
-}
-
-interface MenuProps {
-  onStartVoice: () => void;
 }
 
 // Category → Unsplash image map (matching Scott's Fresh Kitchens real categories)
@@ -57,7 +53,7 @@ function getItemImage(item: MenuItem): string {
   return ITEM_IMAGES[item.name] || CATEGORY_IMAGES[item.category] || DEFAULT_IMAGE;
 }
 
-export const Menu: React.FC<MenuProps> = ({ onStartVoice }) => {
+export const Menu: React.FC = () => {
   const [items, setItems] = useState<MenuItem[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -108,7 +104,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartVoice }) => {
     <div className="space-y-10">
       <section className="text-center space-y-4">
         <h2 className="font-headline text-4xl font-extrabold tracking-tight text-on-surface">Our Fresh Menu</h2>
-        <p className="text-on-surface/70 font-medium">Fresh, feel-good food made to order. Use your voice to customize anything.</p>
+        <p className="text-on-surface/70 font-medium">Fresh, feel-good food made to order. Tap the mic to order with your voice.</p>
       </section>
 
       {sortedCategories.map((category) => (
@@ -143,13 +139,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartVoice }) => {
                     <p className="text-sm text-on-surface/80 leading-relaxed">{item.description}</p>
 
                     <div className="flex flex-wrap gap-3 items-center">
-                      <button
-                        onClick={onStartVoice}
-                        className="flex items-center gap-2 bg-primary px-5 py-2.5 rounded-full text-on-primary font-bold text-sm shadow-lg shadow-primary/20 hover:brightness-110 transition-all"
-                      >
-                        <Mic size={16} fill="currentColor" />
-                        Order with Voice
-                      </button>
                       {item.calories && (
                         <span className="text-xs font-headline font-bold uppercase text-on-surface/50 bg-surface-container-highest px-3 py-1.5 rounded-full">
                           {item.calories} cal
@@ -168,15 +157,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartVoice }) => {
       <section className="bg-surface-container-highest/30 rounded-xl p-8 border border-primary/10 space-y-6">
         <div className="text-center space-y-2">
           <h3 className="font-headline text-2xl font-black">Ready to Order?</h3>
-          <p className="text-on-surface/60 font-medium">Tell our voice assistant what you'd like — customize anything on the menu.</p>
+          <p className="text-on-surface/60 font-medium">Tap the mic button to tell our voice assistant what you'd like — customize anything on the menu.</p>
         </div>
-        <button
-          onClick={onStartVoice}
-          className="w-full bg-gradient-to-br from-primary-dim to-primary text-on-primary py-5 rounded-xl font-headline text-lg font-extrabold tracking-wide shadow-xl shadow-primary/25 hover:opacity-90 transition-all flex items-center justify-center gap-3"
-        >
-          <Mic size={24} fill="currentColor" />
-          Start Voice Order
-        </button>
       </section>
     </div>
   );

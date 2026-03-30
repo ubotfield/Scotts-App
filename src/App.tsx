@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Home as HomeIcon, UtensilsCrossed, ReceiptText, User, Menu as MenuIcon, Mic } from 'lucide-react';
+import { Home as HomeIcon, UtensilsCrossed, ReceiptText, User, Menu as MenuIcon } from 'lucide-react';
 import { Home } from './components/Home';
 import { Menu } from './components/Menu';
 import { Orders } from './components/Orders';
@@ -11,13 +11,12 @@ type Tab = 'home' | 'menu' | 'orders' | 'profile';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
-  const [isVoiceActive, setIsVoiceActive] = useState(false);
 
   const renderContent = () => {
     switch (activeTab) {
       case 'home': return <Home onNavigate={(tab: Tab) => setActiveTab(tab)} />;
-      case 'menu': return <Menu onStartVoice={() => setIsVoiceActive(true)} />;
-      case 'orders': return <Orders onStartVoice={() => setIsVoiceActive(true)} />;
+      case 'menu': return <Menu />;
+      case 'orders': return <Orders />;
       case 'profile': return <Profile />;
     }
   };
@@ -56,24 +55,8 @@ export default function App() {
         </AnimatePresence>
       </main>
 
-      {/* Voice Assistant Overlay */}
-      <VoiceAssistant
-        isActive={isVoiceActive}
-        onToggle={() => setIsVoiceActive(!isVoiceActive)}
-      />
-
-      {/* Floating Voice Button (Mobile) */}
-      {!isVoiceActive && (
-        <motion.button
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          whileTap={{ scale: 0.9 }}
-          onClick={() => setIsVoiceActive(true)}
-          className="fixed bottom-28 right-6 z-40 w-16 h-16 bg-primary text-on-primary rounded-full shadow-2xl flex items-center justify-center voice-pulse"
-        >
-          <Mic size={32} fill="currentColor" />
-        </motion.button>
-      )}
+      {/* Voice Assistant — self-contained: mic button + inline popup bar */}
+      <VoiceAssistant />
 
       {/* Bottom Navigation */}
       <nav className="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 pb-8 pt-4 bg-surface/80 backdrop-blur-xl rounded-t-xl shadow-[0_-4px_24px_rgba(44,37,37,0.08)]">
