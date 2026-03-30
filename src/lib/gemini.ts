@@ -110,6 +110,21 @@ export class GeminiLiveService {
             callbacks.onOpen?.();
             // Start capturing mic audio
             this.startMicCapture();
+            // Kickstart: send initial text to trigger the first sendToAgent call
+            setTimeout(() => {
+              if (this.session) {
+                console.log("[gemini] Sending kickstart text...");
+                this.session.sendClientContent({
+                  turns: [
+                    {
+                      role: "user",
+                      parts: [{ text: "Hello, I'd like to start ordering." }],
+                    },
+                  ],
+                  turnComplete: true,
+                });
+              }
+            }, 500);
           },
           onmessage: (message: LiveServerMessage) => {
             this.handleServerMessage(message);
@@ -135,11 +150,31 @@ export class GeminiLiveService {
   }
 
   private handleServerMessage(message: LiveServerMessage): void {
+    // Debug: log message types we receive
+    if (message.setupComplete) {
+      console.log("[gemini] Setup complete");
+    }
+    if (message.serverContent?.modelTurn?.parts) {
+      const partTypes = message.serverContent.modelTurn.parts.map(
+        (p: any) => p.inlineData ? "audio" : p.text ? "text" : p.functionCall ? "functionCall" : "unknown"
+      );
+      console.log("[gemini] Model turn parts:", partTypes.join(", "));
+    }
+    if (message.toolCall) {
+      console.log("[gemini] ToolCall received:", JSON.stringify(message.toolCall.functionCalls?.map(f => f.name)));
+    }
+
     // Handle audio output (TTS)
     if (message.serverContent?.modelTurn?.parts) {
       for (const part of message.serverContent.modelTurn.parts) {
         if (part.inlineData?.data) {
           this.playAudioChunk(part.inlineData.data);
+        }
+        // Also check for function calls embedded in model turn parts
+        if ((part as any).functionCall) {
+          const fc = (part as any).functionCall;
+          console.log("[gemini] Function call in model turn:", fc.name, fc.args);
+          this.handleFunctionCalls([fc]);
         }
       }
     }
@@ -149,7 +184,7 @@ export class GeminiLiveService {
       this.callbacks.onStatusChange?.("Listening...");
     }
 
-    // Handle function calls from Gemini
+    // Handle function calls from Gemini (top-level toolCall)
     if (message.toolCall?.functionCalls) {
       this.handleFunctionCalls(message.toolCall.functionCalls);
     }
