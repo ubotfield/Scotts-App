@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: scotts-app
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npx tsx server.ts

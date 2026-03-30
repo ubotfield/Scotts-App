@@ -138,7 +138,10 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                 const greeting = await agentRef.current.sendMessage("Hello");
                 console.log("[voice] Greeting from agent:", greeting.substring(0, 80));
 
-                if (useNativeRef.current) {
+                // Guard: don't speak greeting if user already disconnected
+                if (!agentRef.current?.isActive) {
+                  console.log("[voice] Session ended during greeting fetch, skipping");
+                } else if (useNativeRef.current) {
                   await nativeRef.current?.sendGreeting(greeting);
                 } else {
                   await geminiRef.current?.sendGreeting(greeting);
@@ -247,10 +250,10 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 40 }}
             className={cn(
-              "fixed bottom-28 left-4 right-4 z-50 px-5 py-4 rounded-2xl shadow-2xl flex items-center gap-3 border backdrop-blur-md",
+              "fixed bottom-28 left-4 right-4 z-50 px-5 py-4 rounded-2xl shadow-2xl flex items-center gap-3 border",
               hasError
-                ? "border-red-500/50 bg-red-50/95"
-                : "border-primary/10 bg-surface/95"
+                ? "border-red-500/50 bg-red-50"
+                : "border-primary/10 bg-surface"
             )}
           >
             {/* Mic icon / volume bars */}
@@ -260,7 +263,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                   key={i}
                   animate={{
                     height: isListening
-                      ? Math.max(6, volume * (12 + i * 8) + Math.random() * 4)
+                      ? Math.max(6, volume * (12 + i * 8))
                       : 6,
                   }}
                   transition={{
