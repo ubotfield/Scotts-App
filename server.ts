@@ -26,6 +26,13 @@ const SF_CLIENT_ID = (process.env.SF_CLIENT_ID || process.env.SALESFORCE_CLIENT_
 const SF_CLIENT_SECRET = (process.env.SF_CLIENT_SECRET || process.env.SALESFORCE_CLIENT_SECRET)!;
 const SF_AGENT_ID = (process.env.SF_AGENT_ID || process.env.AGENT_ID)!;
 
+// ╔════════════════════════════════════════════════════════════════════╗
+// ║ CRITICAL: Agent API calls MUST go to https://api.salesforce.com   ║
+// ║ NOT the org instance URL. The org URL returns "URL No Longer       ║
+// ║ Exists" for /einstein/ai-agent/v1/* paths. DO NOT CHANGE THIS.    ║
+// ╚════════════════════════════════════════════════════════════════════╝
+const AGENT_API_BASE = "https://api.salesforce.com";
+
 // ─── Token cache ─────────────────────────────────────────────────
 let cachedToken: string | null = null;
 let cachedInstanceUrl: string | null = null;
@@ -95,8 +102,9 @@ async function sfFetch(
   const { accessToken, instanceUrl, apiInstanceUrl } =
     await getAccessToken();
 
-  // Agent API calls go through api.salesforce.com; data queries go through org instance URL
-  const baseUrl = options.useApiUrl ? apiInstanceUrl : (options.instanceUrl || instanceUrl);
+  // Agent API calls MUST go through api.salesforce.com (hardcoded constant);
+  // data queries go through the org instance URL from OAuth response.
+  const baseUrl = options.useApiUrl ? AGENT_API_BASE : (options.instanceUrl || instanceUrl);
   const url = `${baseUrl}${path}`;
 
   const res = await fetch(url, {
