@@ -104,51 +104,8 @@ export class NativeVoiceService {
         console.log("[native-voice] speechSynthesis pre-warmed");
       }
 
-      // Set up speech recognition
-      this.recognition = new SpeechRecognition();
-      this.recognition.continuous = true;
-      this.recognition.interimResults = false;
-      this.recognition.lang = "en-US";
-      this.recognition.maxAlternatives = 1;
-
-      this.recognition.onstart = () => {
-        console.log("[native-voice] Recognition started");
-        callbacks.onStatusChange?.("Listening...");
-      };
-
-      this.recognition.onresult = (event: any) => {
-        const last = event.results[event.results.length - 1];
-        if (last.isFinal) {
-          const text = last[0].transcript.trim();
-          if (text) {
-            console.log("[native-voice] User said:", text);
-            this.routeToAgent(text);
-          }
-        }
-      };
-
-      this.recognition.onerror = (event: any) => {
-        console.error("[native-voice] Recognition error:", event.error);
-        // "no-speech" and "aborted" are non-fatal — just restart
-        if (event.error === "no-speech" || event.error === "aborted") {
-          if (this.shouldRestart && this._isConnected) {
-            this.restartRecognition();
-          }
-          return;
-        }
-        callbacks.onError?.(event.error);
-        callbacks.onStatusChange?.(`Error: ${event.error}`);
-      };
-
-      this.recognition.onend = () => {
-        console.log("[native-voice] Recognition ended");
-        // Auto-restart if we're still supposed to be listening
-        if (this.shouldRestart && this._isConnected) {
-          this.restartRecognition();
-        }
-      };
-
-      // Start recognition
+      // Set up and start speech recognition
+      this.setupRecognition();
       this.shouldRestart = true;
       this.recognition.start();
 
@@ -164,16 +121,87 @@ export class NativeVoiceService {
   }
 
   private restartRecognition(): void {
-    try {
-      setTimeout(() => {
-        if (this.shouldRestart && this._isConnected && this.recognition) {
-          console.log("[native-voice] Restarting recognition");
+    setTimeout(() => {
+      if (!this.shouldRestart || !this._isConnected) return;
+
+      try {
+        // Try to start the existing recognition instance
+        if (this.recognition) {
+          console.log("[native-voice] Restarting recognition...");
           this.recognition.start();
+          return;
         }
-      }, 300);
-    } catch (err) {
-      console.warn("[native-voice] Failed to restart recognition:", err);
-    }
+      } catch (err) {
+        console.warn("[native-voice] recognition.start() failed, recreating:", err);
+      }
+
+      // If start() failed or recognition is null, recreate it entirely
+      // iOS WebKit often needs a fresh SpeechRecognition after audio playback
+      try {
+        this.setupRecognition();
+        this.recognition?.start();
+        console.log("[native-voice] Recognition recreated and started");
+      } catch (err2) {
+        console.error("[native-voice] Failed to recreate recognition:", err2);
+        this.callbacks.onStatusChange?.("Tap mic to retry");
+      }
+    }, 500);
+  }
+
+  /**
+   * Create (or recreate) the SpeechRecognition instance with all event handlers.
+   * Needed for iOS WebKit which can invalidate recognition after audio playback.
+   */
+  private setupRecognition(): void {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) return;
+
+    // Stop any existing instance
+    try { this.recognition?.stop(); } catch { /* ignore */ }
+
+    this.recognition = new SpeechRecognition();
+    this.recognition.continuous = true;
+    this.recognition.interimResults = false;
+    this.recognition.lang = "en-US";
+    this.recognition.maxAlternatives = 1;
+
+    this.recognition.onstart = () => {
+      console.log("[native-voice] Recognition started");
+      this.callbacks.onStatusChange?.("Listening...");
+    };
+
+    this.recognition.onresult = (event: any) => {
+      const last = event.results[event.results.length - 1];
+      if (last.isFinal) {
+        const text = last[0].transcript.trim();
+        if (text) {
+          console.log("[native-voice] User said:", text);
+          this.routeToAgent(text);
+        }
+      }
+    };
+
+    this.recognition.onerror = (event: any) => {
+      console.error("[native-voice] Recognition error:", event.error);
+      if (event.error === "no-speech" || event.error === "aborted") {
+        if (this.shouldRestart && this._isConnected) {
+          this.restartRecognition();
+        }
+        return;
+      }
+      this.callbacks.onError?.(event.error);
+      this.callbacks.onStatusChange?.(`Error: ${event.error}`);
+    };
+
+    this.recognition.onend = () => {
+      console.log("[native-voice] Recognition ended");
+      if (this.shouldRestart && this._isConnected) {
+        this.restartRecognition();
+      }
+    };
   }
 
   /**
