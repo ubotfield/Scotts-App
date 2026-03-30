@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Mic } from "lucide-react";
-import { GeminiLiveService } from "../lib/gemini";
+import { GeminiLiveService, hasGeminiApiKey } from "../lib/gemini";
 import { NativeVoiceService } from "../lib/native-voice";
 import { AgentforceSession } from "../lib/agentforce-api";
 import { cn } from "../lib/utils";
@@ -19,7 +19,17 @@ interface VoiceAssistantProps {
   onOrderPlaced?: (order: any) => void;
 }
 
-/** Detect if we're running inside Capacitor (native iOS app) or mobile Safari */
+/**
+ * Detect if we should use NativeVoiceService (Web Speech API + server TTS)
+ * instead of Gemini Live (bidirectional WebSocket).
+ *
+ * Returns true when:
+ *   1. Running inside Capacitor (native iOS app)
+ *   2. Running on iOS Safari / WKWebView (WebSocket issues with Gemini)
+ *   3. Running as standalone PWA on iOS
+ *   4. Gemini API key is missing from the build (no client-side Gemini possible)
+ *   5. Any mobile device (Web Speech is more reliable on mobile)
+ */
 function shouldUseNativeVoice(): boolean {
   // Check for Capacitor
   if ((window as any).Capacitor?.isNativePlatform?.()) return true;
@@ -32,6 +42,17 @@ function shouldUseNativeVoice(): boolean {
 
   // Check for standalone PWA on iOS
   if ((navigator as any).standalone) return true;
+
+  // Check for any mobile device — Web Speech API is more reliable on mobile
+  const isMobile = /Android|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  if (isMobile) return true;
+
+  // If the Gemini API key wasn't baked into this build, Gemini Live can't work.
+  // Fall back to Web Speech API + server-side TTS on ALL platforms.
+  if (!hasGeminiApiKey()) {
+    console.log("[voice] No Gemini API key in build — using Web Speech API + server TTS");
+    return true;
+  }
 
   return false;
 }

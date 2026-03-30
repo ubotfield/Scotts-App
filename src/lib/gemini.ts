@@ -34,6 +34,15 @@ When you receive such a message, speak ONLY the quoted text naturally and warmly
 
 If you hear the user speak, do NOTHING. Stay completely silent. Wait for a text relay message.`;
 
+/** Check if a Gemini API key was baked into this build. */
+export function hasGeminiApiKey(): boolean {
+  const key =
+    (typeof process !== "undefined" && process.env?.GEMINI_API_KEY) ||
+    (import.meta as any).env?.VITE_GEMINI_API_KEY ||
+    "";
+  return !!key;
+}
+
 export class GeminiLiveService {
   private ai: GoogleGenAI;
   private session: any = null;

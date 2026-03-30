@@ -36,7 +36,7 @@ export function getApiBase(): string {
 
   if (isCapacitor) {
     // Default to Cloud Run URL if no build-time value
-    _apiBase = "https://ais-pre-7huhr6qvfjisfgnfsitrxo-354667129093.us-west2.run.app";
+    _apiBase = "https://scott-s-kitchen-new-remix-ub-216654559320.us-west1.run.app";
     console.log("[api-base] Capacitor detected, using:", _apiBase);
     return _apiBase;
   }
