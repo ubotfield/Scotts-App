@@ -27,6 +27,7 @@ export class NativeVoiceService {
   private callbacks: NativeVoiceCallbacks = {};
   private isProcessing = false;
   private audioContext: AudioContext | null = null;
+  private playbackContext: AudioContext | null = null; // Separate context for TTS playback
   private mediaStream: MediaStream | null = null;
   private volumeAnalyser: AnalyserNode | null = null;
   private volumeInterval: number | null = null;
@@ -72,6 +73,36 @@ export class NativeVoiceService {
       this.volumeAnalyser.fftSize = 256;
       source.connect(this.volumeAnalyser);
       this.startVolumeMonitor();
+
+      // ── Pre-warm audio for iOS ──────────────────────────────
+      // iOS/WebKit blocks AudioContext playback unless it's "unlocked"
+      // during a user gesture. This connect() is called from the mic
+      // button tap (a user gesture), so we unlock everything now.
+
+      // 1. Create a dedicated playback AudioContext and resume it
+      this.playbackContext = new AudioContext();
+      await this.playbackContext.resume();
+      console.log("[native-voice] Playback AudioContext state:", this.playbackContext.state);
+
+      // 2. Play a tiny silent buffer to fully unlock iOS audio
+      try {
+        const silentBuffer = this.playbackContext.createBuffer(1, 1, 22050);
+        const silentSource = this.playbackContext.createBufferSource();
+        silentSource.buffer = silentBuffer;
+        silentSource.connect(this.playbackContext.destination);
+        silentSource.start(0);
+        console.log("[native-voice] Silent buffer played — iOS audio unlocked");
+      } catch (e) {
+        console.warn("[native-voice] Silent buffer play failed:", e);
+      }
+
+      // 3. Pre-warm browser speechSynthesis (fallback TTS)
+      if ("speechSynthesis" in window) {
+        const warmup = new SpeechSynthesisUtterance("");
+        warmup.volume = 0;
+        window.speechSynthesis.speak(warmup);
+        console.log("[native-voice] speechSynthesis pre-warmed");
+      }
 
       // Set up speech recognition
       this.recognition = new SpeechRecognition();
@@ -260,7 +291,17 @@ export class NativeVoiceService {
   private async playAudioBuffer(data: ArrayBuffer): Promise<void> {
     return new Promise(async (resolve) => {
       try {
-        const ctx = this.audioContext || new AudioContext();
+        // Use the pre-warmed playbackContext (unlocked during user gesture)
+        // Fall back to audioContext or a new one if needed
+        let ctx = this.playbackContext || this.audioContext;
+        if (!ctx || ctx.state === "closed") {
+          ctx = new AudioContext();
+        }
+        // Ensure the context is running (iOS may suspend it)
+        if (ctx.state === "suspended") {
+          await ctx.resume();
+        }
+        console.log("[native-voice] Playing audio via context state:", ctx.state);
         const audioBuffer = await ctx.decodeAudioData(data.slice(0));
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
@@ -269,6 +310,7 @@ export class NativeVoiceService {
         source.start();
       } catch (err) {
         console.warn("[native-voice] Audio playback error:", err);
+        // Fallback: try browser TTS if audio playback fails
         resolve();
       }
     });
@@ -315,9 +357,11 @@ export class NativeVoiceService {
     }
     this.volumeAnalyser = null;
 
-    // Close audio context
+    // Close audio contexts
     this.audioContext?.close();
     this.audioContext = null;
+    this.playbackContext?.close();
+    this.playbackContext = null;
 
     // Stop any browser TTS
     if ("speechSynthesis" in window) {
