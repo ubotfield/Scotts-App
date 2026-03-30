@@ -4,3 +4,8 @@ dist
 .env.local
 .env.*.local
 *.log
+
+# iOS (Capacitor)
+ios/App/Pods/
+ios/App/DerivedData/
+ios/App/*.xcworkspace/xcuserdata/
