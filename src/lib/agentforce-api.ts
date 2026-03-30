@@ -2,6 +2,7 @@
  * Client-side helper for communicating with the Agentforce Agent API
  * via the Express server proxy at /api/agent/*.
  */
+import { apiUrl } from "./api-base";
 
 export type AgentMessage = {
   role: "user" | "agent";
@@ -26,7 +27,7 @@ export class AgentforceSession {
    * Start a new agent session.
    */
   async start(): Promise<void> {
-    const res = await fetch("/api/agent/session", { method: "POST" });
+    const res = await fetch(apiUrl("/api/agent/session"), { method: "POST" });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: "Unknown error" }));
@@ -58,7 +59,7 @@ export class AgentforceSession {
       timestamp: Date.now(),
     });
 
-    const res = await fetch("/api/agent/message", {
+    const res = await fetch(apiUrl("/api/agent/message"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -94,7 +95,7 @@ export class AgentforceSession {
 
     try {
       // Use URL path param — no body on DELETE (Agent API rejects bodies)
-      await fetch(`/api/agent/session/${this.sessionId}`, {
+      await fetch(apiUrl(`/api/agent/session/${this.sessionId}`), {
         method: "DELETE",
       });
       console.log("[agentforce] Session ended:", this.sessionId);

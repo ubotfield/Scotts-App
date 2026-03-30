@@ -5,10 +5,8 @@ const config: CapacitorConfig = {
   appName: 'Scotts Fresh Kitchens',
   webDir: 'dist',
   server: {
-    // Load from Cloud Run so API routes (/api/*) work in the native app.
-    // The native app shell loads the web content from this URL instead of local dist/.
-    url: 'https://ais-pre-7huhr6qvfjisfgnfsitrxo-354667129093.us-west2.run.app',
-    cleartext: false,
+    // Load web content from local dist/ bundle (fast, works offline for UI).
+    // API calls are routed via the API_BASE_URL env var baked into the build.
   },
   ios: {
     contentInset: 'automatic',

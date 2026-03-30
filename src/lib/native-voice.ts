@@ -10,6 +10,8 @@
  * Falls back gracefully: if SpeechRecognition is unavailable, reports error.
  */
 
+import { apiUrl } from "./api-base";
+
 export interface NativeVoiceCallbacks {
   onOpen?: () => void;
   onClose?: () => void;
@@ -213,7 +215,7 @@ export class NativeVoiceService {
   private async speakText(text: string): Promise<void> {
     try {
       // Try server-side TTS first (Gemini)
-      const res = await fetch("/api/tts", {
+      const res = await fetch(apiUrl("/api/tts"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),

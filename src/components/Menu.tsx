@@ -63,7 +63,8 @@ export const Menu: React.FC = () => {
 
   const fetchMenu = async () => {
     try {
-      const res = await fetch('/api/menu');
+      const { apiUrl } = await import('../lib/api-base');
+      const res = await fetch(apiUrl('/api/menu'));
       if (res.ok) {
         const data = await res.json();
         setItems(data.items || []);

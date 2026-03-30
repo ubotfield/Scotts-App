@@ -11,6 +11,10 @@ export default defineConfig(({mode}) => {
       'process.env.GEMINI_API_KEY': JSON.stringify(
         process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || env.VITE_GEMINI_API_KEY || ''
       ),
+      // API_BASE_URL: empty for browser (relative paths work), set for Capacitor builds
+      '__API_BASE_URL__': JSON.stringify(
+        process.env.API_BASE_URL || env.API_BASE_URL || ''
+      ),
     },
     resolve: {
       alias: {
