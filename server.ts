@@ -7,7 +7,17 @@ dotenv.config();
 const app = express();
 app.use(express.json());
 
-const PORT = 3001;
+// ─── CORS (needed for AI Studio iframe serving) ─────────────────
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
+// AI Studio assigns PORT via env; fallback to 3001 for local dev
+const PORT = process.env.PORT || 3001;
 
 // ─── Salesforce config (supports both SF_ and SALESFORCE_ env var names) ───
 const SF_LOGIN_URL =
@@ -346,10 +356,20 @@ function getStaticMenu() {
 // ─── Start ───────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🍽️  Scott's Fresh Kitchens API Server`);
-  console.log(`   Running on http://localhost:${PORT}`);
+  console.log(`   Running on port ${PORT}`);
   console.log(`   Agent ID: ${SF_AGENT_ID || "NOT SET"}`);
   console.log(`   Instance: ${SF_LOGIN_URL}`);
   console.log(
-    `   Auth: ${SF_CLIENT_ID && SF_CLIENT_SECRET ? "Configured" : "⚠️  Missing credentials"}\n`
+    `   Auth: ${SF_CLIENT_ID && SF_CLIENT_SECRET ? "Configured ✓" : "⚠️  Missing credentials"}`
   );
+  console.log(`   Env vars present:`);
+  console.log(`     SF_CLIENT_ID: ${!!process.env.SF_CLIENT_ID}`);
+  console.log(`     SALESFORCE_CLIENT_ID: ${!!process.env.SALESFORCE_CLIENT_ID}`);
+  console.log(`     SF_CLIENT_SECRET: ${!!process.env.SF_CLIENT_SECRET}`);
+  console.log(`     SALESFORCE_CLIENT_SECRET: ${!!process.env.SALESFORCE_CLIENT_SECRET}`);
+  console.log(`     SF_AGENT_ID: ${!!process.env.SF_AGENT_ID}`);
+  console.log(`     AGENT_ID: ${!!process.env.AGENT_ID}`);
+  console.log(`     SF_INSTANCE_URL: ${!!process.env.SF_INSTANCE_URL}`);
+  console.log(`     SALESFORCE_ORG_URL: ${!!process.env.SALESFORCE_ORG_URL}`);
+  console.log(`     PORT: ${process.env.PORT || "(not set, using default)"}\n`);
 });
