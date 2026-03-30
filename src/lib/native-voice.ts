@@ -202,6 +202,8 @@ export class NativeVoiceService {
   private resumeRecognition(): void {
     this.shouldRestart = true;
     if (this._isConnected) {
+      console.log("[native-voice] Resuming recognition...");
+      this.callbacks.onStatusChange?.("Listening...");
       this.restartRecognition();
     }
   }
@@ -220,23 +222,36 @@ export class NativeVoiceService {
 
     try {
       if (this.callbacks.onUserTranscription) {
+        console.log("[native-voice] Sending to agent:", userText);
         const agentResponse = await this.callbacks.onUserTranscription(userText);
         console.log("[native-voice] Agent response:", agentResponse.substring(0, 100));
 
         if (agentResponse) {
           this.callbacks.onStatusChange?.("Speaking...");
           this.pauseRecognition();
-          await this.speakText(agentResponse);
+          try {
+            await this.speakText(agentResponse);
+          } catch (speakErr) {
+            console.error("[native-voice] speakText failed:", speakErr);
+          }
           this.resumeRecognition();
+        } else {
+          console.warn("[native-voice] Empty agent response");
+          this.callbacks.onStatusChange?.("Listening...");
         }
       }
     } catch (err: any) {
       console.error("[native-voice] Agent routing error:", err);
       this.pauseRecognition();
-      await this.speakText("I'm sorry, I had trouble with that. Could you say it again?");
+      try {
+        await this.speakText("I'm sorry, I had trouble with that. Could you say it again?");
+      } catch (speakErr) {
+        console.error("[native-voice] Error speech failed too:", speakErr);
+      }
       this.resumeRecognition();
     } finally {
       this.isProcessing = false;
+      console.log("[native-voice] Processing complete, isProcessing:", this.isProcessing);
     }
   }
 

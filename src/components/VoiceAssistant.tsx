@@ -139,10 +139,11 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                 console.log("[voice] Greeting from agent:", greeting.substring(0, 80));
 
                 if (useNativeRef.current) {
-                  nativeRef.current?.sendGreeting(greeting);
+                  await nativeRef.current?.sendGreeting(greeting);
                 } else {
-                  geminiRef.current?.sendGreeting(greeting);
+                  await geminiRef.current?.sendGreeting(greeting);
                 }
+                setStatus("Listening...");
               }
             } catch (err) {
               console.warn("[voice] Greeting failed (non-fatal):", err);
