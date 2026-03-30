@@ -596,9 +596,11 @@ export class NativeVoiceService {
     this.greetingDone = true;
 
     if (this.sttMode === "speech-recognition") {
-      this.resumeListening();
+      await this.resumeListening();
     } else {
       // FIX 2: NOW start MediaRecorder for the first time
+      // Also refresh mic stream since iOS may have disrupted it during greeting TTS
+      await this.refreshMicStream();
       this.callbacks.onStatusChange?.("Listening...");
       if (!this.isRecording && this._isConnected) {
         this.startMediaRecording();
@@ -618,7 +620,7 @@ export class NativeVoiceService {
     }
   }
 
-  private resumeListening(): void {
+  private async resumeListening(): Promise<void> {
     console.log("[native-voice] Resuming listening (mode:", this.sttMode + ")");
     this.shouldRestart = true;
     if (!this._isConnected) return;
@@ -629,12 +631,57 @@ export class NativeVoiceService {
       // For Safari: recreate recognition fresh after audio playback
       this.restartRecognition();
     } else {
-      // For MediaRecorder: start a new recording session after short delay
+      // iOS kills mic input after audio playback — re-acquire stream + resume AudioContext
+      await this.refreshMicStream();
+
+      // Start a new recording session after short delay
       setTimeout(() => {
         if (this.shouldRestart && this._isConnected && !this.isRecording) {
           this.startMediaRecording();
         }
       }, 200);
+    }
+  }
+
+  /**
+   * Re-acquire mic stream and rebuild audio analyser after TTS playback.
+   * iOS suspends the monitoring AudioContext and kills mic input after
+   * switching the hardware audio session to "playback" mode.
+   */
+  private async refreshMicStream(): Promise<void> {
+    try {
+      // 1. Resume monitoring AudioContext (may be suspended after playback)
+      if (this.audioContext && this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
+        console.log("[native-voice] Monitoring AudioContext resumed from suspended");
+      }
+
+      // 2. Re-acquire microphone (iOS audio session may have killed old stream)
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+
+      // 3. Stop old tracks
+      this.mediaStream?.getTracks().forEach(t => t.stop());
+      this.mediaStream = newStream;
+
+      // 4. Rebuild analyser connection with new stream
+      if (this.audioContext && this.audioContext.state === "running") {
+        const source = this.audioContext.createMediaStreamSource(newStream);
+        this.volumeAnalyser = this.audioContext.createAnalyser();
+        this.volumeAnalyser.fftSize = 256;
+        source.connect(this.volumeAnalyser);
+        console.log("[native-voice] Analyser rebuilt with fresh mic stream");
+      }
+
+      console.log("[native-voice] Mic stream refreshed successfully");
+    } catch (err) {
+      console.warn("[native-voice] refreshMicStream failed:", err);
+      // Continue anyway — existing stream might still work on some platforms
     }
   }
 
@@ -663,10 +710,12 @@ export class NativeVoiceService {
           }
           // Small delay before resuming
           await new Promise(r => setTimeout(r, 300));
-          this.resumeListening();
+          await this.resumeListening();
         } else {
           console.warn("[native-voice] Empty agent response");
           this.callbacks.onStatusChange?.("Listening...");
+          // Still need to restart recording for empty responses
+          this.scheduleMediaRestart();
         }
       }
     } catch (err: any) {
@@ -678,18 +727,12 @@ export class NativeVoiceService {
         console.error("[native-voice] Error speech failed too:", speakErr);
       }
       await new Promise(r => setTimeout(r, 300));
-      this.resumeListening();
+      await this.resumeListening();
     } finally {
       this.isProcessing = false;
       console.log("[native-voice] Processing complete, isProcessing:", this.isProcessing);
-
-      // FIX 3: Explicitly restart MediaRecorder after processing completes.
-      // This ensures we always restart even if scheduleMediaRestart() was called
-      // while isProcessing was still true (before the finally block ran).
-      if (this.sttMode === "media-recorder" && this.shouldRestart && this._isConnected && !this.isRecording) {
-        console.log("[native-voice] Post-processing: restarting MediaRecorder");
-        this.scheduleMediaRestart();
-      }
+      // NOTE: No scheduleMediaRestart here — resumeListening() in try/catch handles it.
+      // Having it here caused a race condition with duplicate MediaRecorder instances.
     }
   }
 

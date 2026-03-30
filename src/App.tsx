@@ -24,7 +24,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-surface flex flex-col">
       {/* Top App Bar */}
-      <header className="bg-surface/80 backdrop-blur-md flex justify-between items-center w-full px-6 py-4 fixed top-0 z-50">
+      <header className="bg-surface flex justify-between items-center w-full px-6 py-4 fixed top-0 z-50" style={{ paddingTop: 'max(1rem, env(safe-area-inset-top))' }}>
         <div className="flex items-center gap-4">
           <button className="text-primary hover:opacity-80 transition-opacity">
             <MenuIcon size={24} />
@@ -41,7 +41,7 @@ export default function App() {
       </header>
 
       {/* Main Content */}
-      <main className="flex-grow pt-24 pb-32 px-6 max-w-5xl mx-auto w-full">
+      <main className="flex-grow pt-28 pb-32 px-6 max-w-5xl mx-auto w-full">
         <AnimatePresence mode="wait">
           <motion.div
             key={activeTab}
@@ -59,7 +59,7 @@ export default function App() {
       <VoiceAssistant />
 
       {/* Bottom Navigation */}
-      <nav className="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 pb-8 pt-4 bg-surface/80 backdrop-blur-xl rounded-t-xl shadow-[0_-4px_24px_rgba(44,37,37,0.08)]">
+      <nav className="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 pb-8 pt-4 bg-surface rounded-t-xl shadow-[0_-4px_24px_rgba(44,37,37,0.08)]">
         {[
           { id: 'home', icon: HomeIcon, label: 'Home' },
           { id: 'menu', icon: UtensilsCrossed, label: 'Menu' },
