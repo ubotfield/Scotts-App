@@ -1,15 +1,18 @@
-import { GoogleGenAI, Modality, Type } from "@google/genai";
-import type { FunctionCall, LiveServerMessage } from "@google/genai";
+import { GoogleGenAI, Modality } from "@google/genai";
+import type { LiveServerMessage } from "@google/genai";
 
 /**
- * GeminiLiveService — bidirectional voice with Agentforce relay via function calling.
+ * GeminiLiveService — bidirectional voice with Agentforce relay.
  *
  * Architecture:
- *   User speaks → Gemini Live (STT) → detects user intent → calls sendToAgent function
- *   → client intercepts → /api/agent/message → Agentforce response
- *   → function result returned to Gemini → Gemini speaks it (TTS)
+ *   User speaks → Gemini Live (captures audio, provides inputTranscription)
+ *   → Client intercepts transcription → /api/agent/message → Agentforce response
+ *   → Client sends response text to Gemini via sendClientContent
+ *   → Gemini speaks it (TTS with Zephyr voice)
  *
- * Gemini handles ONLY voice I/O. Agentforce handles ALL ordering/loyalty logic.
+ * KEY INSIGHT: Gemini Live in audio-only mode CANNOT do function calling.
+ * So we use inputTranscription events to get the user's speech as text,
+ * route to Agentforce ourselves, and feed back the response for Gemini to speak.
  */
 
 export interface GeminiCallbacks {
@@ -18,59 +21,35 @@ export interface GeminiCallbacks {
   onError?: (error: string) => void;
   onVolumeChange?: (volume: number) => void;
   onStatusChange?: (status: string) => void;
-  onMessage?: (message: LiveServerMessage) => void;
-  /** Called when Gemini wants to invoke a function (sendToAgent). Return the agent's response. */
-  onFunctionCall?: (name: string, args: Record<string, unknown>) => Promise<string>;
+  /** Called when user speech is transcribed. Return the agent's response text for Gemini to speak. */
+  onUserTranscription?: (text: string) => Promise<string>;
 }
 
-// The one tool Gemini knows about — routes all user speech to Agentforce
-const SEND_TO_AGENT_TOOL = {
-  functionDeclarations: [
-    {
-      name: "sendToAgent",
-      description:
-        "Send the user's message to the restaurant ordering agent and get a response. " +
-        "Call this function for EVERY user utterance — you do not answer questions yourself.",
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          userMessage: {
-            type: Type.STRING,
-            description: "The user's spoken message to send to the agent",
-          },
-        },
-        required: ["userMessage"],
-      },
-    },
-  ],
-};
-
 const SYSTEM_INSTRUCTION =
-  `You are a voice relay for Scott's Fresh Kitchens restaurant. Your ONLY job is:
-1. Listen to what the customer says
-2. Call the sendToAgent function with their exact words
-3. When you get the function response, speak it out loud naturally and warmly
+  `You are a voice assistant for Scott's Fresh Kitchens restaurant.
+Your job is to speak the text that is provided to you naturally and warmly, as a friendly restaurant ordering assistant.
 
-CRITICAL RULES:
-- NEVER answer questions yourself — ALWAYS call sendToAgent for every user message
-- NEVER make up menu items, prices, or order details
-- When speaking the agent's response, be natural, warm, and conversational
-- Do not add extra commentary beyond what the agent says
-- If the user says hello or any greeting, call sendToAgent with their greeting
-- Start by calling sendToAgent with "Hello" to get the initial greeting`;
+RULES:
+- When you receive a message, read it out loud naturally and conversationally
+- Do NOT add extra commentary or make up information
+- Do NOT answer questions on your own — just speak exactly what is provided
+- Be warm, friendly, and clear
+- If a message seems like a restaurant greeting, deliver it enthusiastically`;
 
 export class GeminiLiveService {
   private ai: GoogleGenAI;
   private session: any = null;
   private callbacks: GeminiCallbacks = {};
   private audioContext: AudioContext | null = null;
+  private micAudioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
-  private audioWorklet: AudioWorkletNode | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private volumeAnalyser: AnalyserNode | null = null;
   private volumeInterval: number | null = null;
   private playbackQueue: Float32Array[] = [];
   private isPlaying = false;
+  private isProcessing = false; // prevent overlapping agent calls
+  private pendingTranscript = ""; // accumulate partial transcriptions
 
   constructor() {
     const apiKey =
@@ -101,30 +80,16 @@ export class GeminiLiveService {
               prebuiltVoiceConfig: { voiceName: "Zephyr" },
             },
           },
-          tools: [SEND_TO_AGENT_TOOL],
+          // Enable input transcription so we can intercept user speech
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
         },
         callbacks: {
           onopen: () => {
             console.log("[gemini] Connected");
             callbacks.onStatusChange?.("Connected");
             callbacks.onOpen?.();
-            // Start capturing mic audio
             this.startMicCapture();
-            // Kickstart: send initial text to trigger the first sendToAgent call
-            setTimeout(() => {
-              if (this.session) {
-                console.log("[gemini] Sending kickstart text...");
-                this.session.sendClientContent({
-                  turns: [
-                    {
-                      role: "user",
-                      parts: [{ text: "Hello, I'd like to start ordering." }],
-                    },
-                  ],
-                  turnComplete: true,
-                });
-              }
-            }, 500);
           },
           onmessage: (message: LiveServerMessage) => {
             this.handleServerMessage(message);
@@ -149,85 +114,115 @@ export class GeminiLiveService {
     }
   }
 
+  /**
+   * Send initial greeting through the agent and have Gemini speak it.
+   * Call this after connect() resolves and the session is ready.
+   */
+  async sendGreeting(greetingResponse: string): Promise<void> {
+    if (!this.session || !greetingResponse) return;
+    console.log("[gemini] Speaking greeting:", greetingResponse.substring(0, 80));
+    this.callbacks.onStatusChange?.("Speaking...");
+    this.session.sendClientContent({
+      turns: [
+        {
+          role: "user",
+          parts: [{ text: `Please say this to the customer: "${greetingResponse}"` }],
+        },
+      ],
+      turnComplete: true,
+    });
+  }
+
   private handleServerMessage(message: LiveServerMessage): void {
-    // Debug: log message types we receive
-    if (message.setupComplete) {
-      console.log("[gemini] Setup complete");
-    }
-    if (message.serverContent?.modelTurn?.parts) {
-      const partTypes = message.serverContent.modelTurn.parts.map(
-        (p: any) => p.inlineData ? "audio" : p.text ? "text" : p.functionCall ? "functionCall" : "unknown"
-      );
-      console.log("[gemini] Model turn parts:", partTypes.join(", "));
-    }
-    if (message.toolCall) {
-      console.log("[gemini] ToolCall received:", JSON.stringify(message.toolCall.functionCalls?.map(f => f.name)));
+    const raw = message as any;
+
+    // Handle input transcription — this is the user's speech as text
+    if (raw.serverContent?.inputTranscription?.text) {
+      const transcript = raw.serverContent.inputTranscription.text.trim();
+      if (transcript) {
+        console.log("[gemini] User said:", transcript);
+        // Route to Agentforce
+        this.routeToAgent(transcript);
+      }
+      return; // Don't process further for transcription messages
     }
 
-    // Handle audio output (TTS)
-    if (message.serverContent?.modelTurn?.parts) {
-      for (const part of message.serverContent.modelTurn.parts) {
+    // Handle audio output (Gemini speaking)
+    if (raw.serverContent?.modelTurn?.parts) {
+      for (const part of raw.serverContent.modelTurn.parts) {
         if (part.inlineData?.data) {
           this.playAudioChunk(part.inlineData.data);
         }
-        // Also check for function calls embedded in model turn parts
-        if ((part as any).functionCall) {
-          const fc = (part as any).functionCall;
-          console.log("[gemini] Function call in model turn:", fc.name, fc.args);
-          this.handleFunctionCalls([fc]);
-        }
       }
     }
 
-    // Handle turn complete
-    if (message.serverContent?.turnComplete) {
+    // Handle turn complete — Gemini finished speaking
+    if (raw.serverContent?.turnComplete) {
+      console.log("[gemini] Turn complete");
       this.callbacks.onStatusChange?.("Listening...");
     }
 
-    // Handle function calls from Gemini (top-level toolCall)
-    if (message.toolCall?.functionCalls) {
-      this.handleFunctionCalls(message.toolCall.functionCalls);
+    // Handle output transcription (what Gemini said — for debugging)
+    if (raw.serverContent?.outputTranscription?.text) {
+      console.log("[gemini] Gemini said:", raw.serverContent.outputTranscription.text);
     }
-
-    // Pass through for external handling
-    this.callbacks.onMessage?.(message);
   }
 
-  private async handleFunctionCalls(functionCalls: FunctionCall[]): Promise<void> {
-    const responses: Array<{ id: string; name: string; response: Record<string, unknown> }> = [];
+  /**
+   * Take user's transcribed speech, send to Agentforce, feed response back to Gemini to speak.
+   */
+  private async routeToAgent(userText: string): Promise<void> {
+    if (this.isProcessing) {
+      console.log("[gemini] Already processing, queuing:", userText);
+      this.pendingTranscript = userText; // keep latest
+      return;
+    }
 
-    for (const call of functionCalls) {
-      if (call.name === "sendToAgent" && this.callbacks.onFunctionCall) {
-        this.callbacks.onStatusChange?.("Processing...");
-        try {
-          const agentResponse = await this.callbacks.onFunctionCall(
-            call.name,
-            (call.args as Record<string, unknown>) || {}
-          );
-          responses.push({
-            id: call.id || "",
-            name: call.name,
-            response: { output: agentResponse },
-          });
-        } catch (err: any) {
-          console.error("[gemini] Function call error:", err);
-          responses.push({
-            id: call.id || "",
-            name: call.name || "sendToAgent",
-            response: {
-              error: err.message || "Failed to reach the restaurant agent",
-            },
+    this.isProcessing = true;
+    this.callbacks.onStatusChange?.("Processing...");
+
+    try {
+      if (this.callbacks.onUserTranscription) {
+        const agentResponse = await this.callbacks.onUserTranscription(userText);
+        console.log("[gemini] Agent response:", agentResponse.substring(0, 100));
+
+        // Feed the agent response to Gemini to speak aloud
+        if (this.session && agentResponse) {
+          this.callbacks.onStatusChange?.("Speaking...");
+          this.session.sendClientContent({
+            turns: [
+              {
+                role: "user",
+                parts: [{ text: `Please say this to the customer: "${agentResponse}"` }],
+              },
+            ],
+            turnComplete: true,
           });
         }
       }
-    }
+    } catch (err: any) {
+      console.error("[gemini] Agent routing error:", err);
+      // Speak an error message
+      if (this.session) {
+        this.session.sendClientContent({
+          turns: [
+            {
+              role: "user",
+              parts: [{ text: 'Please say: "I\'m sorry, I had trouble with that. Could you say it again?"' }],
+            },
+          ],
+          turnComplete: true,
+        });
+      }
+    } finally {
+      this.isProcessing = false;
 
-    // Send function responses back to Gemini so it can speak them
-    if (responses.length > 0 && this.session) {
-      this.callbacks.onStatusChange?.("Speaking...");
-      this.session.sendToolResponse({
-        functionResponses: responses,
-      });
+      // Process any queued transcript
+      if (this.pendingTranscript) {
+        const queued = this.pendingTranscript;
+        this.pendingTranscript = "";
+        this.routeToAgent(queued);
+      }
     }
   }
 
@@ -245,19 +240,19 @@ export class GeminiLiveService {
         },
       });
 
-      const ctx = new AudioContext({ sampleRate: 16000 });
-      this.sourceNode = ctx.createMediaStreamSource(this.mediaStream);
+      this.micAudioContext = new AudioContext({ sampleRate: 16000 });
+      this.sourceNode = this.micAudioContext.createMediaStreamSource(this.mediaStream);
 
       // Volume analyser for UI visualization
-      this.volumeAnalyser = ctx.createAnalyser();
+      this.volumeAnalyser = this.micAudioContext.createAnalyser();
       this.volumeAnalyser.fftSize = 256;
       this.sourceNode.connect(this.volumeAnalyser);
       this.startVolumeMonitor();
 
-      // Use ScriptProcessor for PCM capture (AudioWorklet needs separate file)
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      // Use ScriptProcessor for PCM capture
+      const processor = this.micAudioContext.createScriptProcessor(4096, 1, 1);
       this.sourceNode.connect(processor);
-      processor.connect(ctx.destination);
+      processor.connect(this.micAudioContext.destination);
 
       processor.onaudioprocess = (event) => {
         if (!this.session) return;
@@ -365,13 +360,17 @@ export class GeminiLiveService {
     this.sourceNode = null;
     this.volumeAnalyser = null;
 
-    // Close audio context
+    // Close audio contexts
+    this.micAudioContext?.close();
+    this.micAudioContext = null;
     this.audioContext?.close();
     this.audioContext = null;
 
     // Clear playback queue
     this.playbackQueue = [];
     this.isPlaying = false;
+    this.isProcessing = false;
+    this.pendingTranscript = "";
 
     // Close Gemini session
     if (this.session) {

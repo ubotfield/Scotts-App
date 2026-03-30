@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Mic, X } from "lucide-react";
+import { Mic } from "lucide-react";
 import { GeminiLiveService } from "../lib/gemini";
 import { AgentforceSession } from "../lib/agentforce-api";
 import { cn } from "../lib/utils";
@@ -9,10 +9,10 @@ import { cn } from "../lib/utils";
  * VoiceAssistant — inline popup bar (not full-screen overlay).
  *
  * Flow:
- *   User speaks → Gemini Live (STT) → sendToAgent function call
- *   → AgentforceSession.sendMessage() → Agentforce Agent API
- *   → response text → returned to Gemini as function result
- *   → Gemini speaks it (TTS)
+ *   User speaks → Gemini Live (captures audio + provides inputTranscription)
+ *   → Client intercepts transcription → Agentforce Agent API
+ *   → Agent response text → sent to Gemini via sendClientContent
+ *   → Gemini speaks it (TTS with Zephyr voice)
  */
 
 interface VoiceAssistantProps {
@@ -39,7 +39,6 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
       geminiRef.current?.disconnect();
       geminiRef.current = null;
 
-      // End Agentforce session
       agentRef.current?.end();
       agentRef.current = null;
 
@@ -68,22 +67,35 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
       }
 
       try {
-        // 1. Start Agentforce session first
+        // 1. Start Agentforce session
         const agent = new AgentforceSession();
         await agent.start();
         agentRef.current = agent;
 
-        // 2. Start Gemini Live with function calling
+        // 2. Start Gemini Live (audio I/O with transcription)
         const service = new GeminiLiveService();
         geminiRef.current = service;
 
         await service.connect({
-          onOpen: () => {
+          onOpen: async () => {
             setIsActive(true);
             setIsConnecting(false);
             setIsListening(true);
             setHasError(false);
             hasErrorRef.current = false;
+
+            // 3. Send initial greeting to Agentforce, then have Gemini speak it
+            try {
+              if (agentRef.current?.isActive) {
+                setStatus("Getting greeting...");
+                const greeting = await agentRef.current.sendMessage("Hello");
+                console.log("[voice] Greeting from agent:", greeting.substring(0, 80));
+                service.sendGreeting(greeting);
+              }
+            } catch (err) {
+              console.warn("[voice] Greeting failed (non-fatal):", err);
+              setStatus("Listening...");
+            }
           },
           onClose: () => {
             if (!hasErrorRef.current) {
@@ -106,28 +118,16 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           onStatusChange: (s) => {
             setStatus(s);
           },
-          onFunctionCall: async (name, args) => {
-            // Gemini detected user speech and wants to send it to Agentforce
-            if (name === "sendToAgent" && agentRef.current?.isActive) {
-              const userMessage = (args.userMessage as string) || "";
-              console.log("[voice] → Agentforce:", userMessage);
-              setStatus("Processing...");
-
-              const response = await agentRef.current.sendMessage(userMessage);
-              console.log("[voice] ← Agentforce:", response.substring(0, 80));
-              return response;
+          onUserTranscription: async (userText) => {
+            // Gemini transcribed user speech — route to Agentforce
+            if (!agentRef.current?.isActive) {
+              return "I'm sorry, the connection was lost. Please try again.";
             }
-            return "I'm sorry, I couldn't process that. Please try again.";
-          },
-          onMessage: (msg) => {
-            // Check for function calls related to order placement
-            if (msg.toolCall?.functionCalls) {
-              for (const call of msg.toolCall.functionCalls) {
-                if (call.name === "placeOrder" && call.args) {
-                  onOrderPlaced?.(call.args);
-                }
-              }
-            }
+            console.log("[voice] → Agentforce:", userText);
+            setStatus("Processing...");
+            const response = await agentRef.current.sendMessage(userText);
+            console.log("[voice] ← Agentforce:", response.substring(0, 80));
+            return response;
           },
         });
       } catch (err: any) {
