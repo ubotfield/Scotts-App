@@ -5,8 +5,10 @@ const config: CapacitorConfig = {
   appName: 'Scotts Fresh Kitchens',
   webDir: 'dist',
   server: {
-    // Uncomment to load from Cloud Run during development:
-    // url: 'https://ais-pre-7huhr6qvfjisfgnfsitrxo-354667129093.us-west2.run.app',
+    // Load from Cloud Run so API routes (/api/*) work in the native app.
+    // The native app shell loads the web content from this URL instead of local dist/.
+    url: 'https://ais-pre-7huhr6qvfjisfgnfsitrxo-354667129093.us-west2.run.app',
+    cleartext: false,
   },
   ios: {
     contentInset: 'automatic',

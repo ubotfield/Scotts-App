@@ -2,21 +2,38 @@ import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Mic } from "lucide-react";
 import { GeminiLiveService } from "../lib/gemini";
+import { NativeVoiceService } from "../lib/native-voice";
 import { AgentforceSession } from "../lib/agentforce-api";
 import { cn } from "../lib/utils";
 
 /**
  * VoiceAssistant — inline popup bar (not full-screen overlay).
  *
- * Flow:
- *   User speaks → Gemini Live (captures audio + provides inputTranscription)
- *   → Client intercepts transcription → Agentforce Agent API
- *   → Agent response text → sent to Gemini via sendClientContent
- *   → Gemini speaks it (TTS with Zephyr voice)
+ * Platform-aware voice:
+ *   - Desktop/Chrome: Gemini Live (bidirectional WebSocket)
+ *   - iOS/Capacitor/Safari: Native Web Speech API + server-side TTS
+ *     (WKWebView blocks Gemini's WebSocket connection)
  */
 
 interface VoiceAssistantProps {
   onOrderPlaced?: (order: any) => void;
+}
+
+/** Detect if we're running inside Capacitor (native iOS app) or mobile Safari */
+function shouldUseNativeVoice(): boolean {
+  // Check for Capacitor
+  if ((window as any).Capacitor?.isNativePlatform?.()) return true;
+  if ((window as any).Capacitor?.getPlatform?.() === "ios") return true;
+
+  // Check for iOS Safari/WKWebView (also has WebSocket issues with Gemini)
+  const ua = navigator.userAgent;
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (isIOS) return true;
+
+  // Check for standalone PWA on iOS
+  if ((navigator as any).standalone) return true;
+
+  return false;
 }
 
 export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
@@ -31,13 +48,18 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
 
   const hasErrorRef = useRef(false);
   const geminiRef = useRef<GeminiLiveService | null>(null);
+  const nativeRef = useRef<NativeVoiceService | null>(null);
   const agentRef = useRef<AgentforceSession | null>(null);
+  const useNativeRef = useRef(false);
 
   const toggleAssistant = async () => {
     if (isActive || hasError) {
       // ─── Stop ─────────────────────────────────────────────
       geminiRef.current?.disconnect();
       geminiRef.current = null;
+
+      nativeRef.current?.disconnect();
+      nativeRef.current = null;
 
       agentRef.current?.end();
       agentRef.current = null;
@@ -61,10 +83,18 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
         geminiRef.current.disconnect();
         geminiRef.current = null;
       }
+      if (nativeRef.current) {
+        nativeRef.current.disconnect();
+        nativeRef.current = null;
+      }
       if (agentRef.current) {
         agentRef.current.end();
         agentRef.current = null;
       }
+
+      // Detect platform
+      useNativeRef.current = shouldUseNativeVoice();
+      console.log("[voice] Platform:", useNativeRef.current ? "native (Web Speech)" : "desktop (Gemini Live)");
 
       try {
         // 1. Start Agentforce session
@@ -72,11 +102,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
         await agent.start();
         agentRef.current = agent;
 
-        // 2. Start Gemini Live (audio I/O with transcription)
-        const service = new GeminiLiveService();
-        geminiRef.current = service;
-
-        await service.connect({
+        const voiceCallbacks = {
           onOpen: async () => {
             setIsActive(true);
             setIsConnecting(false);
@@ -84,13 +110,18 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             setHasError(false);
             hasErrorRef.current = false;
 
-            // 3. Send initial greeting to Agentforce, then have Gemini speak it
+            // Send initial greeting to Agentforce
             try {
               if (agentRef.current?.isActive) {
                 setStatus("Getting greeting...");
                 const greeting = await agentRef.current.sendMessage("Hello");
                 console.log("[voice] Greeting from agent:", greeting.substring(0, 80));
-                service.sendGreeting(greeting);
+
+                if (useNativeRef.current) {
+                  nativeRef.current?.sendGreeting(greeting);
+                } else {
+                  geminiRef.current?.sendGreeting(greeting);
+                }
               }
             } catch (err) {
               console.warn("[voice] Greeting failed (non-fatal):", err);
@@ -105,21 +136,20 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
               setVolume(0);
             }
           },
-          onError: (err) => {
+          onError: (err: string) => {
             console.error("[voice] Error:", err);
             setHasError(true);
             hasErrorRef.current = true;
             setIsConnecting(false);
             setIsListening(false);
           },
-          onVolumeChange: (v) => {
+          onVolumeChange: (v: number) => {
             setVolume(v * 2);
           },
-          onStatusChange: (s) => {
+          onStatusChange: (s: string) => {
             setStatus(s);
           },
-          onUserTranscription: async (userText) => {
-            // Gemini transcribed user speech — route to Agentforce
+          onUserTranscription: async (userText: string) => {
             if (!agentRef.current?.isActive) {
               return "I'm sorry, the connection was lost. Please try again.";
             }
@@ -129,7 +159,18 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             console.log("[voice] ← Agentforce:", response.substring(0, 80));
             return response;
           },
-        });
+        };
+
+        // 2. Start voice service based on platform
+        if (useNativeRef.current) {
+          const native = new NativeVoiceService();
+          nativeRef.current = native;
+          await native.connect(voiceCallbacks);
+        } else {
+          const service = new GeminiLiveService();
+          geminiRef.current = service;
+          await service.connect(voiceCallbacks);
+        }
       } catch (err: any) {
         const errMsg = err?.message || err?.toString?.() || JSON.stringify(err) || "Unknown error";
         console.error("[voice] Failed to start:", errMsg, err);
@@ -147,6 +188,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   useEffect(() => {
     return () => {
       geminiRef.current?.disconnect();
+      nativeRef.current?.disconnect();
       agentRef.current?.end();
     };
   }, []);

@@ -317,6 +317,84 @@ app.get("/api/menu", async (_req, res) => {
 });
 
 /**
+ * POST /api/tts
+ * Text-to-Speech via Gemini REST API.
+ * Converts text to spoken audio (WAV) using Gemini's TTS capability.
+ * Body: { text: string }
+ * Returns: audio/wav binary
+ */
+app.post("/api/tts", async (req, res) => {
+  const { text } = req.body;
+  if (!text) {
+    return res.status(400).json({ error: "text is required" });
+  }
+
+  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_API_KEY) {
+    console.warn("[tts] No GEMINI_API_KEY — returning empty response");
+    return res.status(503).json({ error: "TTS not configured" });
+  }
+
+  try {
+    // Use Gemini REST API for TTS (generateContent with audio response)
+    const apiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: `Please read the following text aloud naturally and warmly, as a friendly restaurant assistant would say it: "${text}"`,
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "audio/wav",
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: "Zephyr" },
+              },
+            },
+          },
+        }),
+      }
+    );
+
+    if (!apiRes.ok) {
+      const errText = await apiRes.text();
+      console.error("[tts] Gemini API failed:", apiRes.status, errText);
+      return res.status(502).json({ error: "TTS generation failed" });
+    }
+
+    const data = await apiRes.json();
+
+    // Extract audio data from response
+    const audioPart = data.candidates?.[0]?.content?.parts?.find(
+      (p: any) => p.inlineData?.mimeType?.startsWith("audio/")
+    );
+
+    if (!audioPart?.inlineData?.data) {
+      console.error("[tts] No audio in Gemini response");
+      return res.status(502).json({ error: "No audio generated" });
+    }
+
+    // Decode base64 audio and send as binary
+    const audioBuffer = Buffer.from(audioPart.inlineData.data, "base64");
+    const mimeType = audioPart.inlineData.mimeType || "audio/wav";
+    res.set("Content-Type", mimeType);
+    res.set("Content-Length", String(audioBuffer.length));
+    return res.send(audioBuffer);
+  } catch (err: any) {
+    console.error("[tts] Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/health
  * Health check endpoint.
  */
