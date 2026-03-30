@@ -21,7 +21,16 @@ export class LiveTTSConnection {
   private config: TTSConfig = {};
 
   constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+    // Vite injects GEMINI_API_KEY at build time via define config.
+    // Also support import.meta.env for Google AI Studio compatibility.
+    const apiKey =
+      (typeof process !== "undefined" && process.env?.GEMINI_API_KEY) ||
+      (import.meta as any).env?.VITE_GEMINI_API_KEY ||
+      "";
+    if (!apiKey) {
+      console.warn("[tts] No GEMINI_API_KEY found — TTS will be unavailable");
+    }
+    this.ai = new GoogleGenAI({ apiKey });
   }
 
   /**
