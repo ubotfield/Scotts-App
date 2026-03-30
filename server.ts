@@ -1,5 +1,10 @@
 import express from "express";
+import path from "path";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: ".env.local" });
 dotenv.config();
@@ -368,6 +373,14 @@ function getStaticMenu() {
     { id: "s-20", name: "Fresh Fruit Cup", price: 4.99, description: "A colorful mix of seasonal fresh fruits — strawberries, blueberries, mango, and kiwi.", category: "Desserts", calories: 120, isPopular: false, available: true },
   ];
 }
+
+// ─── Serve built frontend (Vite dist) ────────────────────────────
+app.use(express.static(path.join(__dirname, "dist")));
+
+// SPA fallback: serve index.html for all non-API routes
+app.get("*", (_req, res) => {
+  res.sendFile(path.join(__dirname, "dist", "index.html"));
+});
 
 // ─── Start ───────────────────────────────────────────────────────
 app.listen(PORT, () => {
