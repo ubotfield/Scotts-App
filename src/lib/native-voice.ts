@@ -241,11 +241,15 @@ export class NativeVoiceService {
   }
 
   /**
-   * Speak text using server-side TTS endpoint, with browser speechSynthesis fallback.
+   * Speak text using server-side TTS with triple-fallback:
+   *   1. Server TTS → AudioContext (pre-warmed)
+   *   2. Server TTS → <audio> HTML element (most iOS-compatible)
+   *   3. Browser speechSynthesis
    */
   private async speakText(text: string): Promise<void> {
     try {
       // Try server-side TTS first (Gemini)
+      console.log("[native-voice] Fetching TTS for:", text.substring(0, 60));
       const res = await fetch(apiUrl("/api/tts"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -253,18 +257,38 @@ export class NativeVoiceService {
       });
 
       if (res.ok) {
+        const contentType = res.headers.get("content-type") || "audio/wav";
         const audioData = await res.arrayBuffer();
+        console.log("[native-voice] TTS response: ", audioData.byteLength, "bytes,", contentType);
+
         if (audioData.byteLength > 0) {
-          await this.playAudioBuffer(audioData);
-          return;
+          // Try 1: AudioContext (pre-warmed during user gesture)
+          try {
+            await this.playAudioBuffer(audioData);
+            console.log("[native-voice] ✓ AudioContext playback succeeded");
+            return;
+          } catch (e) {
+            console.warn("[native-voice] AudioContext playback failed, trying <audio> element:", e);
+          }
+
+          // Try 2: HTML <audio> element (most reliable on iOS)
+          try {
+            await this.playAudioViaElement(audioData, contentType);
+            console.log("[native-voice] ✓ <audio> element playback succeeded");
+            return;
+          } catch (e) {
+            console.warn("[native-voice] <audio> element playback failed:", e);
+          }
         }
+      } else {
+        console.warn("[native-voice] Server TTS HTTP", res.status);
       }
-      console.warn("[native-voice] Server TTS failed, falling back to browser TTS");
     } catch (err) {
-      console.warn("[native-voice] Server TTS error, falling back:", err);
+      console.warn("[native-voice] Server TTS error:", err);
     }
 
-    // Fallback: browser speechSynthesis
+    // Try 3: browser speechSynthesis
+    console.log("[native-voice] Falling back to browser speechSynthesis");
     return this.speakWithBrowserTTS(text);
   }
 
@@ -288,8 +312,43 @@ export class NativeVoiceService {
     });
   }
 
+  /**
+   * Play audio via an HTML <audio> element — most reliable on iOS.
+   * Creates a Blob URL from the raw audio data and plays it through
+   * a standard media element, bypassing AudioContext entirely.
+   */
+  private playAudioViaElement(data: ArrayBuffer, mimeType: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        const blob = new Blob([data], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        audio.onerror = (e) => {
+          console.warn("[native-voice] <audio> element error:", e);
+          URL.revokeObjectURL(url);
+          reject(e);
+        };
+        // play() returns a promise on modern browsers
+        const playPromise = audio.play();
+        if (playPromise) {
+          playPromise.catch((err) => {
+            console.warn("[native-voice] <audio> play() rejected:", err);
+            URL.revokeObjectURL(url);
+            reject(err);
+          });
+        }
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
   private async playAudioBuffer(data: ArrayBuffer): Promise<void> {
-    return new Promise(async (resolve) => {
+    return new Promise(async (resolve, reject) => {
       try {
         // Use the pre-warmed playbackContext (unlocked during user gesture)
         // Fall back to audioContext or a new one if needed
@@ -301,7 +360,7 @@ export class NativeVoiceService {
         if (ctx.state === "suspended") {
           await ctx.resume();
         }
-        console.log("[native-voice] Playing audio via context state:", ctx.state);
+        console.log("[native-voice] AudioContext playback, state:", ctx.state);
         const audioBuffer = await ctx.decodeAudioData(data.slice(0));
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
@@ -309,9 +368,9 @@ export class NativeVoiceService {
         source.onended = () => resolve();
         source.start();
       } catch (err) {
-        console.warn("[native-voice] Audio playback error:", err);
-        // Fallback: try browser TTS if audio playback fails
-        resolve();
+        console.warn("[native-voice] AudioContext playback error:", err);
+        // Reject so speakText() can try the <audio> element fallback
+        reject(err);
       }
     });
   }
