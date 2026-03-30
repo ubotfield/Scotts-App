@@ -318,8 +318,9 @@ app.get("/api/menu", async (_req, res) => {
 
 /**
  * POST /api/tts
- * Text-to-Speech via Gemini REST API.
- * Converts text to spoken audio (WAV) using Gemini's TTS capability.
+ * Text-to-Speech via Gemini TTS REST API.
+ * Uses gemini-2.5-flash-preview-tts model which returns raw PCM audio.
+ * We wrap the PCM data in a WAV header before sending to the client.
  * Body: { text: string }
  * Returns: audio/wav binary
  */
@@ -336,9 +337,9 @@ app.post("/api/tts", async (req, res) => {
   }
 
   try {
-    // Use Gemini REST API for TTS (generateContent with audio response)
+    // Use Gemini TTS model (dedicated TTS, not general-purpose)
     const apiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -347,13 +348,13 @@ app.post("/api/tts", async (req, res) => {
             {
               parts: [
                 {
-                  text: `Please read the following text aloud naturally and warmly, as a friendly restaurant assistant would say it: "${text}"`,
+                  text: `Say cheerfully: ${text}`,
                 },
               ],
             },
           ],
           generationConfig: {
-            responseMimeType: "audio/wav",
+            responseModalities: ["AUDIO"],
             speechConfig: {
               voiceConfig: {
                 prebuiltVoiceConfig: { voiceName: "Zephyr" },
@@ -366,33 +367,68 @@ app.post("/api/tts", async (req, res) => {
 
     if (!apiRes.ok) {
       const errText = await apiRes.text();
-      console.error("[tts] Gemini API failed:", apiRes.status, errText);
+      console.error("[tts] Gemini TTS API failed:", apiRes.status, errText);
       return res.status(502).json({ error: "TTS generation failed" });
     }
 
     const data = await apiRes.json();
 
-    // Extract audio data from response
-    const audioPart = data.candidates?.[0]?.content?.parts?.find(
-      (p: any) => p.inlineData?.mimeType?.startsWith("audio/")
-    );
+    // Extract audio data — the TTS model returns inlineData with raw PCM
+    const audioPart = data.candidates?.[0]?.content?.parts?.[0];
 
     if (!audioPart?.inlineData?.data) {
-      console.error("[tts] No audio in Gemini response");
+      console.error("[tts] No audio in Gemini response:", JSON.stringify(data).substring(0, 200));
       return res.status(502).json({ error: "No audio generated" });
     }
 
-    // Decode base64 audio and send as binary
-    const audioBuffer = Buffer.from(audioPart.inlineData.data, "base64");
-    const mimeType = audioPart.inlineData.mimeType || "audio/wav";
-    res.set("Content-Type", mimeType);
-    res.set("Content-Length", String(audioBuffer.length));
-    return res.send(audioBuffer);
+    // Decode base64 PCM data (s16le, 24kHz, mono)
+    const pcmBuffer = Buffer.from(audioPart.inlineData.data, "base64");
+    console.log("[tts] Got PCM audio:", pcmBuffer.length, "bytes");
+
+    // Wrap raw PCM in a WAV header so browsers can decode it
+    const wavBuffer = wrapPcmInWav(pcmBuffer, 24000, 1, 16);
+
+    res.set("Content-Type", "audio/wav");
+    res.set("Content-Length", String(wavBuffer.length));
+    return res.send(wavBuffer);
   } catch (err: any) {
     console.error("[tts] Error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * Wrap raw PCM (s16le) data in a WAV header.
+ * This makes the audio playable by browsers via AudioContext.decodeAudioData()
+ * and <audio> elements without needing ffmpeg.
+ */
+function wrapPcmInWav(pcmData: Buffer, sampleRate: number, channels: number, bitsPerSample: number): Buffer {
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  const blockAlign = channels * (bitsPerSample / 8);
+  const dataSize = pcmData.length;
+  const headerSize = 44;
+  const fileSize = headerSize + dataSize;
+
+  const header = Buffer.alloc(headerSize);
+  // RIFF header
+  header.write("RIFF", 0);
+  header.writeUInt32LE(fileSize - 8, 4);       // File size minus RIFF header
+  header.write("WAVE", 8);
+  // fmt sub-chunk
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);                 // Sub-chunk size (16 for PCM)
+  header.writeUInt16LE(1, 20);                  // Audio format (1 = PCM)
+  header.writeUInt16LE(channels, 22);           // Number of channels
+  header.writeUInt32LE(sampleRate, 24);         // Sample rate
+  header.writeUInt32LE(byteRate, 28);           // Byte rate
+  header.writeUInt16LE(blockAlign, 32);         // Block align
+  header.writeUInt16LE(bitsPerSample, 34);      // Bits per sample
+  // data sub-chunk
+  header.write("data", 36);
+  header.writeUInt32LE(dataSize, 40);           // Data size
+
+  return Buffer.concat([header, pcmData]);
+}
 
 /**
  * GET /api/health
