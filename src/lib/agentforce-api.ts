@@ -93,10 +93,9 @@ export class AgentforceSession {
     if (!this.sessionId) return;
 
     try {
-      await fetch("/api/agent/session", {
+      // Use URL path param — no body on DELETE (Agent API rejects bodies)
+      await fetch(`/api/agent/session/${this.sessionId}`, {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: this.sessionId }),
       });
       console.log("[agentforce] Session ended:", this.sessionId);
     } catch (err) {

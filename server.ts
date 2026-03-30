@@ -233,18 +233,26 @@ app.post("/api/agent/message", async (req, res) => {
  * End an agent session.
  * Body: { sessionId: string }
  */
-app.delete("/api/agent/session", async (req, res) => {
-  const { sessionId } = req.body;
+app.delete("/api/agent/session/:sessionId", async (req, res) => {
+  const { sessionId } = req.params;
 
   if (!sessionId) {
     return res.status(400).json({ error: "sessionId is required" });
   }
 
   try {
-    const sfRes = await sfFetch(
-      `/einstein/ai-agent/v1/sessions/${sessionId}`,
-      { method: "DELETE", useApiUrl: true }
-    );
+    // CRITICAL: Agent API DELETE must NOT have a body or Content-Type header.
+    // Sending a body causes "ConstraintViolationException: arg2 must not be null".
+    const { accessToken } = await getAccessToken();
+    const url = `${AGENT_API_BASE}/einstein/ai-agent/v1/sessions/${sessionId}`;
+
+    const sfRes = await fetch(url, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+      // NO body, NO Content-Type
+    });
 
     if (!sfRes.ok) {
       const err = await sfRes.text();
