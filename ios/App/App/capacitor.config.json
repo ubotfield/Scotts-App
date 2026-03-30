@@ -1,0 +1,10 @@
+{
+	"appId": "com.scottsfreshkitchens.app",
+	"appName": "Scotts Fresh Kitchens",
+	"webDir": "dist",
+	"server": {},
+	"ios": {
+		"contentInset": "automatic"
+	},
+	"packageClassList": []
+}
