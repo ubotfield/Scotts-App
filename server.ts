@@ -19,15 +19,17 @@ const SF_AGENT_ID = (process.env.SF_AGENT_ID || process.env.AGENT_ID)!;
 // ─── Token cache ─────────────────────────────────────────────────
 let cachedToken: string | null = null;
 let cachedInstanceUrl: string | null = null;
+let cachedApiInstanceUrl: string | null = null;
 let tokenExpiry = 0;
 
 async function getAccessToken(): Promise<{
   accessToken: string;
   instanceUrl: string;
+  apiInstanceUrl: string;
 }> {
   // Return cached token if still valid (with 5-min buffer)
-  if (cachedToken && cachedInstanceUrl && Date.now() < tokenExpiry - 300_000) {
-    return { accessToken: cachedToken, instanceUrl: cachedInstanceUrl };
+  if (cachedToken && cachedInstanceUrl && cachedApiInstanceUrl && Date.now() < tokenExpiry - 300_000) {
+    return { accessToken: cachedToken, instanceUrl: cachedInstanceUrl, apiInstanceUrl: cachedApiInstanceUrl };
   }
 
   console.log("[auth] Fetching new access token via Client Credentials...");
@@ -53,31 +55,39 @@ async function getAccessToken(): Promise<{
   const data = await res.json();
   cachedToken = data.access_token;
   cachedInstanceUrl = data.instance_url;
+  // Agent API uses api.salesforce.com (returned as api_instance_url)
+  cachedApiInstanceUrl = data.api_instance_url || "https://api.salesforce.com";
   // Default 2-hour expiry for Client Credentials tokens
   tokenExpiry = Date.now() + (data.expires_in || 7200) * 1000;
 
   console.log("[auth] Token acquired. Instance URL:", cachedInstanceUrl);
-  return { accessToken: cachedToken!, instanceUrl: cachedInstanceUrl! };
+  console.log("[auth] API Instance URL:", cachedApiInstanceUrl);
+  return { accessToken: cachedToken!, instanceUrl: cachedInstanceUrl!, apiInstanceUrl: cachedApiInstanceUrl! };
 }
 
 /** Clear cached token so next request re-authenticates */
 function invalidateToken() {
   cachedToken = null;
   cachedInstanceUrl = null;
+  cachedApiInstanceUrl = null;
   tokenExpiry = 0;
 }
 
 /**
  * Generic fetch wrapper with automatic token refresh on 401.
+ * Set useApiUrl=true for Agent API calls (routes through api.salesforce.com).
  */
 async function sfFetch(
   path: string,
-  options: RequestInit & { instanceUrl?: string } = {},
+  options: RequestInit & { instanceUrl?: string; useApiUrl?: boolean } = {},
   retry = true
 ): Promise<Response> {
-  const { accessToken, instanceUrl } =
+  const { accessToken, instanceUrl, apiInstanceUrl } =
     await getAccessToken();
-  const url = `${options.instanceUrl || instanceUrl}${path}`;
+
+  // Agent API calls go through api.salesforce.com; data queries go through org instance URL
+  const baseUrl = options.useApiUrl ? apiInstanceUrl : (options.instanceUrl || instanceUrl);
+  const url = `${baseUrl}${path}`;
 
   const res = await fetch(url, {
     ...options,
@@ -110,6 +120,7 @@ app.post("/api/agent/session", async (_req, res) => {
       `/einstein/ai-agent/v1/agents/${SF_AGENT_ID}/sessions`,
       {
         method: "POST",
+        useApiUrl: true,
         body: JSON.stringify({
           externalSessionKey: `scotts-app-${Date.now()}`,
           instanceConfig: {
@@ -155,6 +166,7 @@ app.post("/api/agent/message", async (req, res) => {
       `/einstein/ai-agent/v1/sessions/${sessionId}/messages?sync=true`,
       {
         method: "POST",
+        useApiUrl: true,
         body: JSON.stringify({
           message: {
             sequenceId,
@@ -213,7 +225,7 @@ app.delete("/api/agent/session", async (req, res) => {
   try {
     const sfRes = await sfFetch(
       `/einstein/ai-agent/v1/sessions/${sessionId}`,
-      { method: "DELETE" }
+      { method: "DELETE", useApiUrl: true }
     );
 
     if (!sfRes.ok) {
