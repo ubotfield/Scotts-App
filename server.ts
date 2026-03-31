@@ -320,60 +320,54 @@ app.get("/api/menu", async (_req, res) => {
 
 /**
  * POST /api/tts
- * Text-to-Speech via Gemini TTS REST API.
- * Uses gemini-2.5-flash-preview-tts model which returns raw PCM audio.
- * We wrap the PCM data in a WAV header before sending to the client.
+ * Text-to-Speech via ElevenLabs API.
+ * Returns MP3 audio directly (no PCM/WAV conversion needed).
  * Body: { text: string }
- * Returns: audio/wav binary
+ * Returns: audio/mpeg binary
  */
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "JBFqnCBsd6RMkjVDRZzb"; // Default: George (warm male)
+
 app.post("/api/tts", async (req, res) => {
   const { text } = req.body;
   if (!text) {
     return res.status(400).json({ error: "text is required" });
   }
 
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_API_KEY) {
-    console.warn("[tts] No GEMINI_API_KEY — returning empty response");
+  if (!ELEVENLABS_API_KEY) {
+    console.warn("[tts] No ELEVENLABS_API_KEY — returning 503");
     return res.status(503).json({ error: "TTS not configured" });
   }
 
   const MAX_RETRIES = 3;
-  const ttsRequestBody = JSON.stringify({
-    contents: [
-      {
-        parts: [
-          {
-            text: text,
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      responseModalities: ["AUDIO"],
-      speechConfig: {
-        voiceConfig: {
-          prebuiltVoiceConfig: { voiceName: "Zephyr" },
-        },
-      },
-    },
-  });
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const ttsStart = Date.now();
-      console.log(`[tts] Attempt ${attempt}/${MAX_RETRIES} for: "${text.substring(0, 60)}..."`);
+      console.log(`[tts] ElevenLabs attempt ${attempt}/${MAX_RETRIES}: "${text.substring(0, 60)}..."`);
 
-      // Use AbortController with 15s timeout to prevent hanging
+      // 10s timeout — ElevenLabs is typically ~300ms but guard against edge cases
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
       const apiRes = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
+        `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=mp3_44100_128`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: ttsRequestBody,
+          headers: {
+            "Content-Type": "application/json",
+            "xi-api-key": ELEVENLABS_API_KEY,
+          },
+          body: JSON.stringify({
+            text,
+            model_id: "eleven_multilingual_v2",
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75,
+              style: 0.0,
+              speed: 1.0,
+            },
+          }),
           signal: controller.signal,
         }
       );
@@ -387,7 +381,7 @@ app.post("/api/tts", async (req, res) => {
 
         // Retry on 500, 502, 503, 429 (rate limit)
         if ((apiRes.status >= 500 || apiRes.status === 429) && attempt < MAX_RETRIES) {
-          const delay = attempt * 500; // 500ms, 1000ms backoff
+          const delay = attempt * 500;
           console.log(`[tts] Retrying in ${delay}ms...`);
           await new Promise(r => setTimeout(r, delay));
           continue;
@@ -395,34 +389,16 @@ app.post("/api/tts", async (req, res) => {
         return res.status(502).json({ error: "TTS generation failed" });
       }
 
-      const data = await apiRes.json();
+      // ElevenLabs returns MP3 binary directly — no JSON parsing needed
+      const audioBuffer = Buffer.from(await apiRes.arrayBuffer());
+      console.log(`[tts] Got MP3 audio: ${audioBuffer.length} bytes (attempt ${attempt}, ${Date.now() - ttsStart}ms)`);
 
-      // Extract audio data — the TTS model returns inlineData with raw PCM
-      const audioPart = data.candidates?.[0]?.content?.parts?.[0];
-
-      if (!audioPart?.inlineData?.data) {
-        console.error("[tts] No audio in Gemini response:", JSON.stringify(data).substring(0, 200));
-        if (attempt < MAX_RETRIES) {
-          console.log("[tts] Retrying (empty audio)...");
-          await new Promise(r => setTimeout(r, attempt * 500));
-          continue;
-        }
-        return res.status(502).json({ error: "No audio generated" });
-      }
-
-      // Decode base64 PCM data (s16le, 24kHz, mono)
-      const pcmBuffer = Buffer.from(audioPart.inlineData.data, "base64");
-      console.log(`[tts] Got PCM audio: ${pcmBuffer.length} bytes (attempt ${attempt})`);
-
-      // Wrap raw PCM in a WAV header so browsers can decode it
-      const wavBuffer = wrapPcmInWav(pcmBuffer, 24000, 1, 16);
-
-      res.set("Content-Type", "audio/wav");
-      res.set("Content-Length", String(wavBuffer.length));
-      return res.send(wavBuffer);
+      res.set("Content-Type", "audio/mpeg");
+      res.set("Content-Length", String(audioBuffer.length));
+      return res.send(audioBuffer);
     } catch (err: any) {
       const isTimeout = err.name === "AbortError";
-      console.error(`[tts] Attempt ${attempt} error:`, isTimeout ? "Request timed out (15s)" : err.message);
+      console.error(`[tts] Attempt ${attempt} error:`, isTimeout ? "Timed out (10s)" : err.message);
 
       if (attempt < MAX_RETRIES) {
         const delay = attempt * 500;
@@ -434,7 +410,6 @@ app.post("/api/tts", async (req, res) => {
     }
   }
 
-  // Should not reach here, but just in case
   return res.status(502).json({ error: "TTS failed after all retries" });
 });
 
@@ -503,39 +478,6 @@ app.post("/api/stt", async (req, res) => {
 });
 
 /**
- * Wrap raw PCM (s16le) data in a WAV header.
- * This makes the audio playable by browsers via AudioContext.decodeAudioData()
- * and <audio> elements without needing ffmpeg.
- */
-function wrapPcmInWav(pcmData: Buffer, sampleRate: number, channels: number, bitsPerSample: number): Buffer {
-  const byteRate = sampleRate * channels * (bitsPerSample / 8);
-  const blockAlign = channels * (bitsPerSample / 8);
-  const dataSize = pcmData.length;
-  const headerSize = 44;
-  const fileSize = headerSize + dataSize;
-
-  const header = Buffer.alloc(headerSize);
-  // RIFF header
-  header.write("RIFF", 0);
-  header.writeUInt32LE(fileSize - 8, 4);       // File size minus RIFF header
-  header.write("WAVE", 8);
-  // fmt sub-chunk
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16);                 // Sub-chunk size (16 for PCM)
-  header.writeUInt16LE(1, 20);                  // Audio format (1 = PCM)
-  header.writeUInt16LE(channels, 22);           // Number of channels
-  header.writeUInt32LE(sampleRate, 24);         // Sample rate
-  header.writeUInt32LE(byteRate, 28);           // Byte rate
-  header.writeUInt16LE(blockAlign, 32);         // Block align
-  header.writeUInt16LE(bitsPerSample, 34);      // Bits per sample
-  // data sub-chunk
-  header.write("data", 36);
-  header.writeUInt32LE(dataSize, 40);           // Data size
-
-  return Buffer.concat([header, pcmData]);
-}
-
-/**
  * GET /api/health
  * Health check endpoint.
  */
@@ -548,6 +490,11 @@ app.get("/api/health", async (_req, res) => {
     agentId: SF_AGENT_ID ? `${SF_AGENT_ID.substring(0, 8)}...` : "not set",
     clientIdSet: !!SF_CLIENT_ID,
     clientSecretSet: !!SF_CLIENT_SECRET,
+    tts: {
+      provider: "elevenlabs",
+      keySet: !!ELEVENLABS_API_KEY,
+      voiceId: ELEVENLABS_VOICE_ID,
+    },
     envSource: {
       SF_INSTANCE_URL: !!process.env.SF_INSTANCE_URL,
       SALESFORCE_ORG_URL: !!process.env.SALESFORCE_ORG_URL,
@@ -610,6 +557,9 @@ app.listen(PORT, () => {
   console.log(
     `   Auth: ${SF_CLIENT_ID && SF_CLIENT_SECRET ? "Configured ✓" : "⚠️  Missing credentials"}`
   );
+  console.log(
+    `   TTS: ElevenLabs ${ELEVENLABS_API_KEY ? "Configured ✓" : "⚠️  Missing ELEVENLABS_API_KEY"} (voice: ${ELEVENLABS_VOICE_ID})`
+  );
   console.log(`   Env vars present:`);
   console.log(`     SF_CLIENT_ID: ${!!process.env.SF_CLIENT_ID}`);
   console.log(`     SALESFORCE_CLIENT_ID: ${!!process.env.SALESFORCE_CLIENT_ID}`);
@@ -619,5 +569,6 @@ app.listen(PORT, () => {
   console.log(`     AGENT_ID: ${!!process.env.AGENT_ID}`);
   console.log(`     SF_INSTANCE_URL: ${!!process.env.SF_INSTANCE_URL}`);
   console.log(`     SALESFORCE_ORG_URL: ${!!process.env.SALESFORCE_ORG_URL}`);
+  console.log(`     ELEVENLABS_API_KEY: ${!!process.env.ELEVENLABS_API_KEY}`);
   console.log(`     PORT: ${process.env.PORT || "(not set, using default)"}\n`);
 });
