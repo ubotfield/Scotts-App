@@ -734,47 +734,78 @@ export class NativeVoiceService {
 
     try {
       if (this.callbacks.onUserTranscription) {
+        // Guard: check connection before sending to agent
+        if (!this._isConnected) {
+          console.log("[native-voice] Disconnected before agent call, aborting");
+          return;
+        }
+
         console.log("[native-voice] Sending to agent:", userText);
         const agentResponse = await this.callbacks.onUserTranscription(userText);
         console.log("[native-voice] Agent response:", agentResponse?.substring(0, 100));
+
+        // Guard: check connection AGAIN after agent call (user may have clicked stop)
+        if (!this._isConnected) {
+          console.log("[native-voice] Disconnected during agent call, skipping TTS");
+          return;
+        }
 
         if (agentResponse) {
           this.callbacks.onStatusChange?.("Speaking...");
           this.pauseListening();
           console.log("[native-voice] About to speak agent response...");
           try {
-            await this.speakText(agentResponse);
+            // Final guard before TTS
+            if (this._isConnected) {
+              await this.speakText(agentResponse);
+            } else {
+              console.log("[native-voice] Disconnected before TTS, skipping");
+            }
           } catch (speakErr) {
             console.error("[native-voice] speakText failed:", speakErr);
           }
+
+          // Guard: don't resume if disconnected
+          if (!this._isConnected) {
+            console.log("[native-voice] Disconnected after TTS, not resuming");
+            return;
+          }
+
           console.log("[native-voice] speakText done, waiting 300ms before resume...");
-          // Small delay before resuming
           await new Promise(r => setTimeout(r, 300));
           console.log("[native-voice] Calling resumeListening...");
           await this.resumeListening();
           console.log("[native-voice] resumeListening complete");
         } else {
           console.warn("[native-voice] Empty agent response");
-          this.callbacks.onStatusChange?.("Listening...");
-          // Still need to restart recording for empty responses
-          this.scheduleMediaRestart();
+          if (this._isConnected) {
+            this.callbacks.onStatusChange?.("Listening...");
+            this.scheduleMediaRestart();
+          }
         }
       }
     } catch (err: any) {
       console.error("[native-voice] Agent routing error:", err);
+      // Guard: don't try to speak/resume if disconnected
+      if (!this._isConnected) {
+        console.log("[native-voice] Disconnected during error handling, aborting");
+        return;
+      }
       this.pauseListening();
       try {
-        await this.speakText("I'm sorry, I had trouble with that. Could you say it again?");
+        if (this._isConnected) {
+          await this.speakText("I'm sorry, I had trouble with that. Could you say it again?");
+        }
       } catch (speakErr) {
         console.error("[native-voice] Error speech failed too:", speakErr);
       }
-      await new Promise(r => setTimeout(r, 300));
-      await this.resumeListening();
+      if (this._isConnected) {
+        await new Promise(r => setTimeout(r, 300));
+        await this.resumeListening();
+      }
     } finally {
       this.isProcessing = false;
       console.log("[native-voice] Processing complete, isProcessing:", this.isProcessing);
-      // NOTE: No scheduleMediaRestart here — resumeListening() in try/catch handles it.
-      // Having it here caused a race condition with duplicate MediaRecorder instances.
     }
   }
 
@@ -783,46 +814,70 @@ export class NativeVoiceService {
   // ===================================================================
 
   private async speakText(text: string): Promise<void> {
-    try {
-      console.log("[native-voice] Fetching TTS for:", text.substring(0, 60));
-      const res = await fetch(apiUrl("/api/tts"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
+    // Client-side retry: try server TTS up to 2 times before falling back to browser TTS
+    const MAX_CLIENT_RETRIES = 2;
 
-      if (res.ok) {
-        const contentType = res.headers.get("content-type") || "audio/wav";
-        const audioData = await res.arrayBuffer();
-        console.log("[native-voice] TTS response:", audioData.byteLength, "bytes,", contentType);
+    for (let attempt = 1; attempt <= MAX_CLIENT_RETRIES; attempt++) {
+      // Bail if disconnected between retries
+      if (!this._isConnected) {
+        console.log("[native-voice] Disconnected, aborting TTS");
+        return;
+      }
 
-        if (audioData.byteLength > 0) {
-          // Try 1: AudioContext (pre-warmed during user gesture)
-          try {
-            await this.playAudioBuffer(audioData);
-            console.log("[native-voice] AudioContext playback succeeded");
-            return;
-          } catch (e) {
-            console.warn("[native-voice] AudioContext failed, trying <audio>:", e);
+      try {
+        console.log(`[native-voice] Fetching TTS (attempt ${attempt}/${MAX_CLIENT_RETRIES}):`, text.substring(0, 60));
+        const res = await fetch(apiUrl("/api/tts"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+
+        if (res.ok) {
+          const contentType = res.headers.get("content-type") || "audio/wav";
+          const audioData = await res.arrayBuffer();
+          console.log("[native-voice] TTS response:", audioData.byteLength, "bytes,", contentType);
+
+          if (audioData.byteLength > 0) {
+            // Try 1: AudioContext (pre-warmed during user gesture)
+            try {
+              await this.playAudioBuffer(audioData);
+              console.log("[native-voice] AudioContext playback succeeded");
+              return;
+            } catch (e) {
+              console.warn("[native-voice] AudioContext failed, trying <audio>:", e);
+            }
+
+            // Try 2: HTML <audio> element (most reliable on iOS)
+            try {
+              await this.playAudioViaElement(audioData, contentType);
+              console.log("[native-voice] <audio> element playback succeeded");
+              return;
+            } catch (e) {
+              console.warn("[native-voice] <audio> element failed:", e);
+            }
+
+            // If we got audio data but both playback methods failed, don't retry server
+            // — the issue is playback not generation. Fall through to browser TTS.
+            break;
           }
-
-          // Try 2: HTML <audio> element (most reliable on iOS)
-          try {
-            await this.playAudioViaElement(audioData, contentType);
-            console.log("[native-voice] <audio> element playback succeeded");
-            return;
-          } catch (e) {
-            console.warn("[native-voice] <audio> element failed:", e);
+        } else {
+          console.warn(`[native-voice] Server TTS HTTP ${res.status} (attempt ${attempt})`);
+          if (attempt < MAX_CLIENT_RETRIES) {
+            await new Promise(r => setTimeout(r, 300));
+            continue; // Retry
           }
         }
-      } else {
-        console.warn("[native-voice] Server TTS HTTP", res.status);
+      } catch (err) {
+        console.warn(`[native-voice] Server TTS error (attempt ${attempt}):`, err);
+        if (attempt < MAX_CLIENT_RETRIES) {
+          await new Promise(r => setTimeout(r, 300));
+          continue; // Retry
+        }
       }
-    } catch (err) {
-      console.warn("[native-voice] Server TTS error:", err);
     }
 
-    // Try 3: browser speechSynthesis
+    // Final fallback: browser speechSynthesis
+    if (!this._isConnected) return;
     console.log("[native-voice] All server TTS methods failed, falling back to browser speechSynthesis");
     try {
       await this.speakWithBrowserTTS(text);
@@ -832,7 +887,7 @@ export class NativeVoiceService {
     }
   }
 
-  /** FIX 7: Browser TTS with 10s timeout to prevent hanging forever on iOS */
+  /** Browser TTS with 5s timeout and iOS workarounds */
   private speakWithBrowserTTS(text: string): Promise<void> {
     return new Promise((resolve) => {
       if (!("speechSynthesis" in window)) {
@@ -846,15 +901,19 @@ export class NativeVoiceService {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        clearInterval(iosKeepAlive);
         resolve();
       };
 
-      // FIX 7: 10 second safety timeout
+      // Cancel any previous speech first (iOS can queue and stall)
+      window.speechSynthesis.cancel();
+
+      // 5s safety timeout (reduced from 10s — if it hasn't spoken by then, it won't)
       const timeout = setTimeout(() => {
-        console.warn("[native-voice] Browser TTS timed out after 10s");
+        console.warn("[native-voice] Browser TTS timed out after 5s");
         window.speechSynthesis.cancel();
         finish();
-      }, 10000);
+      }, 5000);
 
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 1.0;
@@ -862,9 +921,22 @@ export class NativeVoiceService {
       utterance.volume = 1.0;
       utterance.lang = "en-US";
       utterance.onend = finish;
-      utterance.onerror = finish;
+      utterance.onerror = (e) => {
+        console.warn("[native-voice] Browser TTS error event:", e);
+        finish();
+      };
+
+      // iOS workaround: speechSynthesis.speaking can freeze — periodically
+      // resume to keep the queue moving (known Safari bug)
+      const iosKeepAlive = setInterval(() => {
+        if (window.speechSynthesis.speaking) {
+          window.speechSynthesis.pause();
+          window.speechSynthesis.resume();
+        }
+      }, 3000);
 
       window.speechSynthesis.speak(utterance);
+      console.log("[native-voice] Browser TTS started:", text.substring(0, 40));
     });
   }
 

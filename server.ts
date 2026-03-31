@@ -338,67 +338,104 @@ app.post("/api/tts", async (req, res) => {
     return res.status(503).json({ error: "TTS not configured" });
   }
 
-  try {
-    const ttsStart = Date.now();
-    // Use Gemini TTS model (dedicated TTS, not general-purpose)
-    const apiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
+  const MAX_RETRIES = 3;
+  const ttsRequestBody = JSON.stringify({
+    contents: [
       {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: text,
-                },
-              ],
-            },
-          ],
-          generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: "Zephyr" },
-              },
-            },
+        parts: [
+          {
+            text: text,
           },
-        }),
+        ],
+      },
+    ],
+    generationConfig: {
+      responseModalities: ["AUDIO"],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: "Zephyr" },
+        },
+      },
+    },
+  });
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const ttsStart = Date.now();
+      console.log(`[tts] Attempt ${attempt}/${MAX_RETRIES} for: "${text.substring(0, 60)}..."`);
+
+      // Use AbortController with 15s timeout to prevent hanging
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      const apiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: ttsRequestBody,
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timeoutId);
+
+      console.log(`[tts] Attempt ${attempt} took ${Date.now() - ttsStart}ms, status: ${apiRes.status}`);
+
+      if (!apiRes.ok) {
+        const errText = await apiRes.text();
+        console.error(`[tts] Attempt ${attempt} failed: ${apiRes.status}`, errText.substring(0, 200));
+
+        // Retry on 500, 502, 503, 429 (rate limit)
+        if ((apiRes.status >= 500 || apiRes.status === 429) && attempt < MAX_RETRIES) {
+          const delay = attempt * 500; // 500ms, 1000ms backoff
+          console.log(`[tts] Retrying in ${delay}ms...`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        return res.status(502).json({ error: "TTS generation failed" });
       }
-    );
-    console.log(`[tts] Gemini API call took ${Date.now() - ttsStart}ms`);
 
-    if (!apiRes.ok) {
-      const errText = await apiRes.text();
-      console.error("[tts] Gemini TTS API failed:", apiRes.status, errText);
-      return res.status(502).json({ error: "TTS generation failed" });
+      const data = await apiRes.json();
+
+      // Extract audio data — the TTS model returns inlineData with raw PCM
+      const audioPart = data.candidates?.[0]?.content?.parts?.[0];
+
+      if (!audioPart?.inlineData?.data) {
+        console.error("[tts] No audio in Gemini response:", JSON.stringify(data).substring(0, 200));
+        if (attempt < MAX_RETRIES) {
+          console.log("[tts] Retrying (empty audio)...");
+          await new Promise(r => setTimeout(r, attempt * 500));
+          continue;
+        }
+        return res.status(502).json({ error: "No audio generated" });
+      }
+
+      // Decode base64 PCM data (s16le, 24kHz, mono)
+      const pcmBuffer = Buffer.from(audioPart.inlineData.data, "base64");
+      console.log(`[tts] Got PCM audio: ${pcmBuffer.length} bytes (attempt ${attempt})`);
+
+      // Wrap raw PCM in a WAV header so browsers can decode it
+      const wavBuffer = wrapPcmInWav(pcmBuffer, 24000, 1, 16);
+
+      res.set("Content-Type", "audio/wav");
+      res.set("Content-Length", String(wavBuffer.length));
+      return res.send(wavBuffer);
+    } catch (err: any) {
+      const isTimeout = err.name === "AbortError";
+      console.error(`[tts] Attempt ${attempt} error:`, isTimeout ? "Request timed out (15s)" : err.message);
+
+      if (attempt < MAX_RETRIES) {
+        const delay = attempt * 500;
+        console.log(`[tts] Retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      return res.status(500).json({ error: err.message });
     }
-
-    const data = await apiRes.json();
-
-    // Extract audio data — the TTS model returns inlineData with raw PCM
-    const audioPart = data.candidates?.[0]?.content?.parts?.[0];
-
-    if (!audioPart?.inlineData?.data) {
-      console.error("[tts] No audio in Gemini response:", JSON.stringify(data).substring(0, 200));
-      return res.status(502).json({ error: "No audio generated" });
-    }
-
-    // Decode base64 PCM data (s16le, 24kHz, mono)
-    const pcmBuffer = Buffer.from(audioPart.inlineData.data, "base64");
-    console.log("[tts] Got PCM audio:", pcmBuffer.length, "bytes");
-
-    // Wrap raw PCM in a WAV header so browsers can decode it
-    const wavBuffer = wrapPcmInWav(pcmBuffer, 24000, 1, 16);
-
-    res.set("Content-Type", "audio/wav");
-    res.set("Content-Length", String(wavBuffer.length));
-    return res.send(wavBuffer);
-  } catch (err: any) {
-    console.error("[tts] Error:", err.message);
-    return res.status(500).json({ error: err.message });
   }
+
+  // Should not reach here, but just in case
+  return res.status(502).json({ error: "TTS failed after all retries" });
 });
 
 /**
