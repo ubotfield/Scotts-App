@@ -561,8 +561,9 @@ export class NativeVoiceService {
       // Convert blob to base64
       const base64 = await this.blobToBase64(blob);
 
-      console.log("[native-voice] Sending audio for STT:", Math.round(blob.size / 1024), "KB");
+      console.log("[native-voice] Sending audio for STT:", Math.round(blob.size / 1024), "KB, mime:", mimeType);
 
+      const sttStart = Date.now();
       const res = await fetch(apiUrl("/api/stt"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -571,6 +572,8 @@ export class NativeVoiceService {
           mimeType: mimeType.split(";")[0], // strip codecs param
         }),
       });
+
+      console.log("[native-voice] STT response in", Date.now() - sttStart, "ms, status:", res.status);
 
       if (!res.ok) {
         console.error("[native-voice] STT request failed:", res.status);
@@ -583,9 +586,11 @@ export class NativeVoiceService {
 
       if (text && text.length > 0) {
         console.log("[native-voice] STT result:", text);
+        console.log("[native-voice] About to call routeToAgent...");
         await this.routeToAgent(text);
+        console.log("[native-voice] routeToAgent completed, isProcessing:", this.isProcessing);
       } else {
-        console.log("[native-voice] No speech detected in audio");
+        console.log("[native-voice] No speech detected in audio, scheduling restart");
         this.scheduleMediaRestart();
       }
     } catch (err) {
@@ -821,6 +826,20 @@ export class NativeVoiceService {
     this.isProcessing = true;
     this.callbacks.onStatusChange?.("Processing...");
 
+    // Safety: if routeToAgent takes > 30s, force-reset isProcessing
+    // This prevents permanent stuck states if any await hangs
+    const processingTimeout = setTimeout(() => {
+      if (this.isProcessing) {
+        console.error("[native-voice] ⚠️ routeToAgent stuck for 30s — force-resetting isProcessing");
+        this.isProcessing = false;
+        if (this._isConnected) {
+          this.callbacks.onStatusChange?.("Listening...");
+          this.shouldRestart = true;
+          this.scheduleMediaRestart();
+        }
+      }
+    }, 30000);
+
     try {
       if (this.callbacks.onUserTranscription) {
         // Guard: check connection before sending to agent
@@ -893,6 +912,7 @@ export class NativeVoiceService {
         await this.resumeListening();
       }
     } finally {
+      clearTimeout(processingTimeout);
       this.isProcessing = false;
       console.log("[native-voice] Processing complete, isProcessing:", this.isProcessing);
     }
@@ -1035,19 +1055,37 @@ export class NativeVoiceService {
         const blob = new Blob([data], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
-        audio.onended = () => {
+
+        let settled = false;
+        const finish = (success: boolean, reason?: any) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(safetyTimeout);
           URL.revokeObjectURL(url);
-          resolve();
+          if (success) resolve(); else reject(reason);
+        };
+
+        // Safety timeout: if onended never fires, resolve after 15s
+        const safetyTimeout = setTimeout(() => {
+          console.warn("[native-voice] <audio> playback timed out after 15s — resolving anyway");
+          try { audio.pause(); } catch { /* ignore */ }
+          finish(true);
+        }, 15000);
+
+        audio.onended = () => {
+          console.log("[native-voice] <audio> onended fired");
+          finish(true);
         };
         audio.onerror = (e) => {
-          URL.revokeObjectURL(url);
-          reject(e);
+          console.warn("[native-voice] <audio> onerror fired:", e);
+          finish(false, e);
         };
         const playPromise = audio.play();
         if (playPromise) {
-          playPromise.catch((err) => {
-            URL.revokeObjectURL(url);
-            reject(err);
+          playPromise.then(() => {
+            console.log("[native-voice] <audio> play() resolved, duration:", audio.duration);
+          }).catch((err) => {
+            finish(false, err);
           });
         }
       } catch (err) {
@@ -1068,15 +1106,35 @@ export class NativeVoiceService {
     }
 
     const audioBuffer = await this.playbackContext.decodeAudioData(data.slice(0));
+    console.log("[native-voice] AudioContext decoded buffer: duration=", audioBuffer.duration.toFixed(2) + "s");
 
     return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(safetyTimeout);
+        resolve();
+      };
+
+      // Safety timeout based on audio duration + 5s buffer
+      const timeoutMs = Math.max(10000, (audioBuffer.duration + 5) * 1000);
+      const safetyTimeout = setTimeout(() => {
+        console.warn("[native-voice] AudioContext playback timed out after", timeoutMs, "ms — resolving anyway");
+        finish();
+      }, timeoutMs);
+
       try {
         const source = this.playbackContext!.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(this.playbackContext!.destination);
-        source.onended = () => resolve();
+        source.onended = () => {
+          console.log("[native-voice] AudioContext source.onended fired");
+          finish();
+        };
         source.start();
       } catch (err) {
+        clearTimeout(safetyTimeout);
         reject(err);
       }
     });
