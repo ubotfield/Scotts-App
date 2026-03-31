@@ -244,6 +244,7 @@ export class NativeVoiceService {
 
     this.recognition.onresult = (event: any) => {
       const last = event.results[event.results.length - 1];
+      console.log("[native-voice] Recognition result: isFinal:", last.isFinal, "text:", last[0]?.transcript?.substring(0, 50));
       if (last.isFinal) {
         const text = last[0].transcript.trim();
         if (text) {
@@ -286,12 +287,12 @@ export class NativeVoiceService {
     // Verify the media stream is still active
     const tracks = this.mediaStream.getAudioTracks();
     if (tracks.length === 0 || tracks[0].readyState !== "live") {
-      console.warn("[native-voice] Media stream tracks not live, cannot record");
+      console.warn("[native-voice] Media stream tracks not live (state:", tracks[0]?.readyState, "), cannot record");
       this.callbacks.onStatusChange?.("Mic error -- tap to retry");
       return;
     }
 
-    console.log("[native-voice] Starting MediaRecorder, MIME:", this.supportedMimeType);
+    console.log("[native-voice] Starting MediaRecorder, MIME:", this.supportedMimeType, "track:", tracks[0].readyState, "audioCtx:", this.audioContext?.state);
 
     try {
       this.recordedChunks = [];
@@ -433,6 +434,7 @@ export class NativeVoiceService {
     let hasSpeech = false;
     let silenceSince: number | null = null;
     const recordingStart = Date.now();
+    let logCounter = 0;
 
     this.silenceDetectionInterval = window.setInterval(() => {
       if (!this.volumeAnalyser || !this.isRecording) {
@@ -444,6 +446,12 @@ export class NativeVoiceService {
       let sum = 0;
       for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
       const volume = sum / dataArray.length / 255;
+
+      // Log volume every 2 seconds so we can diagnose silence issues
+      logCounter++;
+      if (logCounter % 20 === 0) {
+        console.log("[native-voice] Silence check: vol=", volume.toFixed(4), "hasSpeech:", hasSpeech, "elapsed:", Math.round((Date.now() - recordingStart) / 1000) + "s", "audioCtx:", this.audioContext?.state);
+      }
 
       if (volume > SPEECH_THRESHOLD) {
         hasSpeech = true;
@@ -631,8 +639,14 @@ export class NativeVoiceService {
       // For Safari: recreate recognition fresh after audio playback
       this.restartRecognition();
     } else {
-      // iOS kills mic input after audio playback — re-acquire stream + resume AudioContext
-      await this.refreshMicStream();
+      // iOS: re-acquire mic stream + resume AudioContext after TTS playback.
+      // This is critical because iOS suspends AudioContext and kills mic input.
+      // Don't let this block the flow — use a race with timeout.
+      try {
+        await this.refreshMicStream();
+      } catch (err) {
+        console.warn("[native-voice] refreshMicStream error (non-fatal):", err);
+      }
 
       // Start a new recording session after short delay
       setTimeout(() => {
@@ -647,30 +661,48 @@ export class NativeVoiceService {
    * Re-acquire mic stream and rebuild audio analyser after TTS playback.
    * iOS suspends the monitoring AudioContext and kills mic input after
    * switching the hardware audio session to "playback" mode.
+   *
+   * Has a 3s timeout so it can't hang if getUserMedia blocks on iOS.
    */
   private async refreshMicStream(): Promise<void> {
+    // 1. Always resume monitoring AudioContext first
     try {
-      // 1. Resume monitoring AudioContext (may be suspended after playback)
-      if (this.audioContext && this.audioContext.state === "suspended") {
-        await this.audioContext.resume();
-        console.log("[native-voice] Monitoring AudioContext resumed from suspended");
+      if (this.audioContext) {
+        console.log("[native-voice] AudioContext state before resume:", this.audioContext.state);
+        if (this.audioContext.state === "suspended") {
+          await this.audioContext.resume();
+          console.log("[native-voice] Monitoring AudioContext resumed");
+        }
       }
+    } catch (err) {
+      console.warn("[native-voice] AudioContext resume failed:", err);
+    }
 
-      // 2. Re-acquire microphone (iOS audio session may have killed old stream)
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+    // 2. Re-acquire microphone with a timeout
+    // getUserMedia can hang on iOS if audio session is in a bad state
+    try {
+      const newStream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("getUserMedia timeout (3s)")), 3000)
+        ),
+      ]);
 
-      // 3. Stop old tracks
+      // Stop old tracks AFTER successfully getting new stream
       this.mediaStream?.getTracks().forEach(t => t.stop());
       this.mediaStream = newStream;
 
-      // 4. Rebuild analyser connection with new stream
-      if (this.audioContext && this.audioContext.state === "running") {
+      // 3. Rebuild analyser connection with new stream
+      if (this.audioContext && this.audioContext.state !== "closed") {
+        if (this.audioContext.state === "suspended") {
+          await this.audioContext.resume();
+        }
         const source = this.audioContext.createMediaStreamSource(newStream);
         this.volumeAnalyser = this.audioContext.createAnalyser();
         this.volumeAnalyser.fftSize = 256;
@@ -678,10 +710,16 @@ export class NativeVoiceService {
         console.log("[native-voice] Analyser rebuilt with fresh mic stream");
       }
 
-      console.log("[native-voice] Mic stream refreshed successfully");
+      console.log("[native-voice] Mic stream refreshed OK");
     } catch (err) {
-      console.warn("[native-voice] refreshMicStream failed:", err);
-      // Continue anyway — existing stream might still work on some platforms
+      console.warn("[native-voice] refreshMicStream getUserMedia failed:", err);
+      // Fallback: just make sure AudioContext is running with existing stream
+      // The existing stream may still work — silence detection will tell us
+      try {
+        if (this.audioContext && this.audioContext.state === "suspended") {
+          await this.audioContext.resume();
+        }
+      } catch { /* ignore */ }
     }
   }
 
@@ -703,14 +741,18 @@ export class NativeVoiceService {
         if (agentResponse) {
           this.callbacks.onStatusChange?.("Speaking...");
           this.pauseListening();
+          console.log("[native-voice] About to speak agent response...");
           try {
             await this.speakText(agentResponse);
           } catch (speakErr) {
             console.error("[native-voice] speakText failed:", speakErr);
           }
+          console.log("[native-voice] speakText done, waiting 300ms before resume...");
           // Small delay before resuming
           await new Promise(r => setTimeout(r, 300));
+          console.log("[native-voice] Calling resumeListening...");
           await this.resumeListening();
+          console.log("[native-voice] resumeListening complete");
         } else {
           console.warn("[native-voice] Empty agent response");
           this.callbacks.onStatusChange?.("Listening...");
@@ -781,8 +823,13 @@ export class NativeVoiceService {
     }
 
     // Try 3: browser speechSynthesis
-    console.log("[native-voice] Falling back to browser speechSynthesis");
-    return this.speakWithBrowserTTS(text);
+    console.log("[native-voice] All server TTS methods failed, falling back to browser speechSynthesis");
+    try {
+      await this.speakWithBrowserTTS(text);
+      console.log("[native-voice] Browser TTS completed");
+    } catch (err) {
+      console.error("[native-voice] All TTS methods failed:", err);
+    }
   }
 
   /** FIX 7: Browser TTS with 10s timeout to prevent hanging forever on iOS */
