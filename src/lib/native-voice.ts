@@ -419,22 +419,36 @@ export class NativeVoiceService {
   }
 
   private startSilenceDetection(): void {
-    if (!this.volumeAnalyser) return;
-
     // Stop any existing interval
     this.stopSilenceDetection();
 
-    const dataArray = new Uint8Array(this.volumeAnalyser.frequencyBinCount);
-    const SILENCE_THRESHOLD = 0.015;
-    const SPEECH_THRESHOLD = 0.03;
-    const SILENCE_DURATION = 1500;  // 1.5s of silence after speech
-    const MAX_RECORDING = 15000;    // max 15s per chunk
-    const NO_SPEECH_TIMEOUT = 30000; // FIX 5: 30s timeout when user never speaks
+    const CHUNK_DURATION = 4000; // Record 4-second chunks
+    const MAX_RECORDING = 15000; // Max 15s per chunk (safety cap)
 
-    let hasSpeech = false;
-    let silenceSince: number | null = null;
     const recordingStart = Date.now();
+    let hasSpeechViaAnalyser = false;
+    let silenceSince: number | null = null;
     let logCounter = 0;
+
+    // Check if we have a working volume analyser
+    const hasAnalyser = !!this.volumeAnalyser && this.audioContext?.state === "running";
+    const dataArray = hasAnalyser ? new Uint8Array(this.volumeAnalyser!.frequencyBinCount) : null;
+
+    if (!hasAnalyser) {
+      // NO WORKING ANALYSER — use pure timer-based chunking.
+      // This is the critical fallback for iOS PWA where AudioContext is dead
+      // after TTS playback. Record for CHUNK_DURATION then send for transcription.
+      console.log("[native-voice] No working analyser (audioCtx:", this.audioContext?.state, ") — using timer-based chunking");
+      this.silenceDetectionInterval = window.setTimeout(() => {
+        if (this.isRecording) {
+          console.log("[native-voice] Timer chunk complete (", CHUNK_DURATION, "ms), stopping recorder");
+          this.stopMediaRecording();
+        }
+      }, CHUNK_DURATION) as unknown as number;
+      return;
+    }
+
+    console.log("[native-voice] Using analyser-based silence detection");
 
     this.silenceDetectionInterval = window.setInterval(() => {
       if (!this.volumeAnalyser || !this.isRecording) {
@@ -442,21 +456,41 @@ export class NativeVoiceService {
         return;
       }
 
-      this.volumeAnalyser.getByteFrequencyData(dataArray);
+      this.volumeAnalyser.getByteFrequencyData(dataArray!);
       let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-      const volume = sum / dataArray.length / 255;
+      for (let i = 0; i < dataArray!.length; i++) sum += dataArray![i];
+      const volume = sum / dataArray!.length / 255;
 
-      // Log volume every 2 seconds so we can diagnose silence issues
       logCounter++;
       if (logCounter % 20 === 0) {
-        console.log("[native-voice] Silence check: vol=", volume.toFixed(4), "hasSpeech:", hasSpeech, "elapsed:", Math.round((Date.now() - recordingStart) / 1000) + "s", "audioCtx:", this.audioContext?.state);
+        console.log("[native-voice] Silence check: vol=", volume.toFixed(4), "hasSpeech:", hasSpeechViaAnalyser, "elapsed:", Math.round((Date.now() - recordingStart) / 1000) + "s", "audioCtx:", this.audioContext?.state);
       }
 
+      // Detect if analyser is returning all zeros (broken AudioContext)
+      // If after 2 seconds we still have no signal at all, fall back to timer
+      if (logCounter === 20 && !hasSpeechViaAnalyser && volume < 0.001) {
+        console.warn("[native-voice] ⚠️ Analyser returning zeros after 2s — switching to timer-based chunking");
+        this.stopSilenceDetection();
+        // Set a timer to stop recording after remaining chunk duration
+        const elapsed = Date.now() - recordingStart;
+        const remaining = Math.max(1000, CHUNK_DURATION - elapsed);
+        this.silenceDetectionInterval = window.setTimeout(() => {
+          if (this.isRecording) {
+            console.log("[native-voice] Fallback timer chunk complete, stopping recorder");
+            this.stopMediaRecording();
+          }
+        }, remaining) as unknown as number;
+        return;
+      }
+
+      const SILENCE_THRESHOLD = 0.015;
+      const SPEECH_THRESHOLD = 0.03;
+      const SILENCE_DURATION = 1500;
+
       if (volume > SPEECH_THRESHOLD) {
-        hasSpeech = true;
+        hasSpeechViaAnalyser = true;
         silenceSince = null;
-      } else if (volume < SILENCE_THRESHOLD && hasSpeech) {
+      } else if (volume < SILENCE_THRESHOLD && hasSpeechViaAnalyser) {
         if (!silenceSince) {
           silenceSince = Date.now();
         } else if (Date.now() - silenceSince > SILENCE_DURATION) {
@@ -467,16 +501,16 @@ export class NativeVoiceService {
         }
       }
 
-      // Safety: max recording duration (only if speech was detected)
-      if (Date.now() - recordingStart > MAX_RECORDING && hasSpeech) {
+      // Safety: max recording duration
+      if (Date.now() - recordingStart > MAX_RECORDING && hasSpeechViaAnalyser) {
         console.log("[native-voice] Max recording duration reached");
         this.stopSilenceDetection();
         this.stopMediaRecording();
         return;
       }
 
-      // FIX 5: No-speech timeout — restart if user hasn't spoken in 30s
-      if (Date.now() - recordingStart > NO_SPEECH_TIMEOUT && !hasSpeech) {
+      // No-speech timeout — if analyser works but no speech for 30s
+      if (Date.now() - recordingStart > 30000 && !hasSpeechViaAnalyser) {
         console.log("[native-voice] No speech for 30s, restarting recorder");
         this.stopSilenceDetection();
         this.stopMediaRecording();
@@ -486,7 +520,9 @@ export class NativeVoiceService {
 
   private stopSilenceDetection(): void {
     if (this.silenceDetectionInterval !== null) {
+      // Clear both interval and timeout (they share the same ID field)
       clearInterval(this.silenceDetectionInterval);
+      clearTimeout(this.silenceDetectionInterval);
       this.silenceDetectionInterval = null;
     }
   }
