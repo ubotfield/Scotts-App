@@ -607,8 +607,18 @@ export class NativeVoiceService {
       await this.resumeListening();
     } else {
       // FIX 2: NOW start MediaRecorder for the first time
-      // Also refresh mic stream since iOS may have disrupted it during greeting TTS
+      // Also refresh mic stream since iOS may have disrupted it during greeting TTS.
+      // refreshMicStream creates a BRAND NEW AudioContext (critical for iOS Chrome).
       await this.refreshMicStream();
+
+      // Clean up playback context so it doesn't interfere with monitoring
+      try {
+        if (this.playbackContext && this.playbackContext.state !== "closed") {
+          await this.playbackContext.close();
+        }
+      } catch { /* ignore */ }
+      this.playbackContext = null;
+
       this.callbacks.onStatusChange?.("Listening...");
       if (!this.isRecording && this._isConnected) {
         this.startMediaRecording();
@@ -639,14 +649,22 @@ export class NativeVoiceService {
       // For Safari: recreate recognition fresh after audio playback
       this.restartRecognition();
     } else {
-      // iOS: re-acquire mic stream + resume AudioContext after TTS playback.
-      // This is critical because iOS suspends AudioContext and kills mic input.
-      // Don't let this block the flow — use a race with timeout.
+      // iOS: re-acquire mic stream + create fresh AudioContext after TTS playback.
+      // CRITICAL: On iOS Chrome, the old AudioContext cannot resume after audio
+      // playback. refreshMicStream now creates a completely new AudioContext.
       try {
         await this.refreshMicStream();
       } catch (err) {
         console.warn("[native-voice] refreshMicStream error (non-fatal):", err);
       }
+
+      // Also ensure playback context is fresh for next TTS
+      try {
+        if (this.playbackContext && this.playbackContext.state !== "closed") {
+          await this.playbackContext.close();
+        }
+      } catch { /* ignore */ }
+      this.playbackContext = null;
 
       // Start a new recording session after short delay
       setTimeout(() => {
@@ -659,24 +677,29 @@ export class NativeVoiceService {
 
   /**
    * Re-acquire mic stream and rebuild audio analyser after TTS playback.
-   * iOS suspends the monitoring AudioContext and kills mic input after
-   * switching the hardware audio session to "playback" mode.
+   * iOS (especially Chrome) suspends the monitoring AudioContext and kills
+   * mic input after switching the hardware audio session to "playback" mode.
+   *
+   * CRITICAL FIX: On iOS Chrome, the old AudioContext often cannot resume
+   * after audio playback — it stays "suspended" even after .resume().
+   * Solution: Close the old AudioContext entirely and create a fresh one.
    *
    * Has a 3s timeout so it can't hang if getUserMedia blocks on iOS.
    */
   private async refreshMicStream(): Promise<void> {
-    // 1. Always resume monitoring AudioContext first
+    // 1. Close the OLD monitoring AudioContext completely.
+    //    On iOS Chrome, a suspended AudioContext after playback cannot be
+    //    reliably resumed. A fresh context is the only reliable fix.
     try {
-      if (this.audioContext) {
-        console.log("[native-voice] AudioContext state before resume:", this.audioContext.state);
-        if (this.audioContext.state === "suspended") {
-          await this.audioContext.resume();
-          console.log("[native-voice] Monitoring AudioContext resumed");
-        }
+      if (this.audioContext && this.audioContext.state !== "closed") {
+        console.log("[native-voice] Closing old AudioContext (state:", this.audioContext.state + ")");
+        await this.audioContext.close();
       }
     } catch (err) {
-      console.warn("[native-voice] AudioContext resume failed:", err);
+      console.warn("[native-voice] Old AudioContext close error (non-fatal):", err);
     }
+    this.audioContext = null;
+    this.volumeAnalyser = null;
 
     // 2. Re-acquire microphone with a timeout
     // getUserMedia can hang on iOS if audio session is in a bad state
@@ -698,28 +721,58 @@ export class NativeVoiceService {
       this.mediaStream?.getTracks().forEach(t => t.stop());
       this.mediaStream = newStream;
 
-      // 3. Rebuild analyser connection with new stream
-      if (this.audioContext && this.audioContext.state !== "closed") {
-        if (this.audioContext.state === "suspended") {
-          await this.audioContext.resume();
-        }
-        const source = this.audioContext.createMediaStreamSource(newStream);
-        this.volumeAnalyser = this.audioContext.createAnalyser();
-        this.volumeAnalyser.fftSize = 256;
-        source.connect(this.volumeAnalyser);
-        console.log("[native-voice] Analyser rebuilt with fresh mic stream");
+      // 3. Create a BRAND NEW AudioContext and analyser with the fresh stream
+      this.audioContext = new AudioContext();
+      // Must resume explicitly — iOS requires it
+      if (this.audioContext.state === "suspended") {
+        await this.audioContext.resume();
       }
+      const source = this.audioContext.createMediaStreamSource(newStream);
+      this.volumeAnalyser = this.audioContext.createAnalyser();
+      this.volumeAnalyser.fftSize = 256;
+      source.connect(this.volumeAnalyser);
 
-      console.log("[native-voice] Mic stream refreshed OK");
+      // Restart volume monitor with new analyser
+      this.stopVolumeMonitor();
+      this.startVolumeMonitor();
+
+      console.log("[native-voice] Mic stream refreshed OK — new AudioContext state:", this.audioContext.state);
+
+      // 4. Diagnostic: check if we're actually getting audio data
+      setTimeout(() => {
+        if (this.volumeAnalyser) {
+          const testData = new Uint8Array(this.volumeAnalyser.frequencyBinCount);
+          this.volumeAnalyser.getByteFrequencyData(testData);
+          let testSum = 0;
+          for (let i = 0; i < testData.length; i++) testSum += testData[i];
+          const testVol = testSum / testData.length / 255;
+          console.log("[native-voice] Post-refresh audio check: vol=", testVol.toFixed(4), "audioCtx:", this.audioContext?.state);
+          if (this.audioContext?.state === "suspended") {
+            console.warn("[native-voice] ⚠️ AudioContext STILL suspended after refresh — trying resume again");
+            this.audioContext.resume().catch(() => {});
+          }
+        }
+      }, 500);
     } catch (err) {
       console.warn("[native-voice] refreshMicStream getUserMedia failed:", err);
-      // Fallback: just make sure AudioContext is running with existing stream
-      // The existing stream may still work — silence detection will tell us
+      // Fallback: create AudioContext with existing stream if possible
       try {
-        if (this.audioContext && this.audioContext.state === "suspended") {
-          await this.audioContext.resume();
+        if (this.mediaStream) {
+          this.audioContext = new AudioContext();
+          if (this.audioContext.state === "suspended") {
+            await this.audioContext.resume();
+          }
+          const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+          this.volumeAnalyser = this.audioContext.createAnalyser();
+          this.volumeAnalyser.fftSize = 256;
+          source.connect(this.volumeAnalyser);
+          this.stopVolumeMonitor();
+          this.startVolumeMonitor();
+          console.log("[native-voice] Fallback: rebuilt AudioContext with existing stream");
         }
-      } catch { /* ignore */ }
+      } catch (fallbackErr) {
+        console.error("[native-voice] Fallback AudioContext creation also failed:", fallbackErr);
+      }
     }
   }
 
@@ -969,21 +1022,22 @@ export class NativeVoiceService {
 
   /** FIX 4: No async Promise executor — use proper async/await pattern */
   private async playAudioBuffer(data: ArrayBuffer): Promise<void> {
-    let ctx = this.playbackContext || this.audioContext;
-    if (!ctx || ctx.state === "closed") {
-      ctx = new AudioContext();
+    // Always create a dedicated playback context (don't share with monitoring).
+    // This prevents TTS playback from corrupting the mic monitoring AudioContext.
+    if (!this.playbackContext || this.playbackContext.state === "closed") {
+      this.playbackContext = new AudioContext();
     }
-    if (ctx.state === "suspended") {
-      await ctx.resume();
+    if (this.playbackContext.state === "suspended") {
+      await this.playbackContext.resume();
     }
 
-    const audioBuffer = await ctx.decodeAudioData(data.slice(0));
+    const audioBuffer = await this.playbackContext.decodeAudioData(data.slice(0));
 
     return new Promise<void>((resolve, reject) => {
       try {
-        const source = ctx!.createBufferSource();
+        const source = this.playbackContext!.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(ctx!.destination);
+        source.connect(this.playbackContext!.destination);
         source.onended = () => resolve();
         source.start();
       } catch (err) {
