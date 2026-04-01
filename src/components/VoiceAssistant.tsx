@@ -76,15 +76,17 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   const toggleAssistant = async () => {
     if (isActive || hasError) {
       // ─── Stop ─────────────────────────────────────────────
-      geminiRef.current?.disconnect();
+      // Capture refs before nulling — ensures cleanup runs even if React re-renders
+      const gemini = geminiRef.current;
+      const native = nativeRef.current;
+      const agent = agentRef.current;
+
+      // Null refs immediately to prevent any further callbacks
       geminiRef.current = null;
-
-      nativeRef.current?.disconnect();
       nativeRef.current = null;
-
-      agentRef.current?.end();
       agentRef.current = null;
 
+      // Update UI state immediately
       setIsActive(false);
       setIsListening(false);
       setIsConnecting(false);
@@ -92,6 +94,11 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
       hasErrorRef.current = false;
       setVolume(0);
       setStatus("Listening...");
+
+      // Now tear down services (order matters — stop voice first, then agent)
+      try { gemini?.disconnect(); } catch { /* ignore */ }
+      try { native?.disconnect(); } catch { /* ignore */ }
+      try { agent?.end(); } catch { /* ignore */ }
     } else {
       // ─── Start ────────────────────────────────────────────
       setIsConnecting(true);

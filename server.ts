@@ -495,6 +495,10 @@ app.get("/api/health", async (_req, res) => {
       keySet: !!ELEVENLABS_API_KEY,
       voiceId: ELEVENLABS_VOICE_ID,
     },
+    stt: {
+      provider: "gemini",
+      keySet: !!process.env.GEMINI_API_KEY,
+    },
     envSource: {
       SF_INSTANCE_URL: !!process.env.SF_INSTANCE_URL,
       SALESFORCE_ORG_URL: !!process.env.SALESFORCE_ORG_URL,

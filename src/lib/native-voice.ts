@@ -75,6 +75,10 @@ export class NativeVoiceService {
   // Safety
   private pipelineSafetyTimer: number | null = null;
 
+  // Volume tracking for silence detection
+  private peakVolumeDuringChunk = 0;
+  private static readonly SILENCE_THRESHOLD = 0.02; // skip STT if peak volume below this
+
   get isConnected(): boolean {
     return this._isConnected;
   }
@@ -263,7 +267,7 @@ export class NativeVoiceService {
   // Uses simple timer-based 4-second recording chunks.
   // ===================================================================
 
-  private static readonly CHUNK_DURATION_MS = 4000;
+  private static readonly CHUNK_DURATION_MS = 6000;
   private static readonly MIN_AUDIO_SIZE = 2000; // bytes — skip tiny recordings
 
   /**
@@ -296,6 +300,7 @@ export class NativeVoiceService {
     this.pipelineState = "recording";
     this.callbacks.onStatusChange?.("Listening...");
     this.recordedChunks = [];
+    this.peakVolumeDuringChunk = 0; // Reset volume tracking for this chunk
 
     console.log("[native-voice] Starting recording chunk (", NativeVoiceService.CHUNK_DURATION_MS, "ms)");
 
@@ -326,7 +331,7 @@ export class NativeVoiceService {
     };
 
     this.mediaRecorder.onstop = () => {
-      console.log("[native-voice] MediaRecorder stopped, chunks:", this.recordedChunks.length);
+      console.log("[native-voice] MediaRecorder stopped, chunks:", this.recordedChunks.length, "peakVol:", this.peakVolumeDuringChunk.toFixed(3));
       this.clearChunkTimer();
 
       if (this.recordedChunks.length > 0 && this.pipelineState === "recording") {
@@ -334,7 +339,12 @@ export class NativeVoiceService {
         const blob = new Blob(this.recordedChunks, { type: actualMime });
         this.recordedChunks = [];
 
-        if (blob.size > NativeVoiceService.MIN_AUDIO_SIZE) {
+        // Skip STT entirely if the chunk was silent (no voice detected)
+        if (this.peakVolumeDuringChunk < NativeVoiceService.SILENCE_THRESHOLD) {
+          console.log("[native-voice] Silent chunk (peak:", this.peakVolumeDuringChunk.toFixed(3), "), skipping STT");
+          this.pipelineState = "idle";
+          this.scheduleNextChunk();
+        } else if (blob.size > NativeVoiceService.MIN_AUDIO_SIZE) {
           console.log("[native-voice] Sending", Math.round(blob.size / 1024), "KB for transcription");
           this.pipelineState = "transcribing";
           this.transcribeAndRoute(blob, actualMime);
@@ -412,7 +422,8 @@ export class NativeVoiceService {
     }, 45000);
 
     try {
-      this.callbacks.onStatusChange?.("Processing...");
+      // Don't show "Processing..." yet — keep "Listening..." until we confirm speech was detected.
+      // This prevents the visible Listening ↔ Processing loop on silent chunks.
 
       // Convert blob to base64
       const base64 = await this.blobToBase64(blob);
@@ -443,6 +454,7 @@ export class NativeVoiceService {
 
       if (text && text.length > 0) {
         console.log("[native-voice] STT result:", text);
+        this.callbacks.onStatusChange?.("Processing..."); // NOW show Processing — we have actual speech
         await this.routeToAgent(text);
       } else {
         console.log("[native-voice] No speech detected, restarting");
@@ -919,6 +931,11 @@ export class NativeVoiceService {
         for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
         const average = sum / dataArray.length / 255;
         this.callbacks.onVolumeChange?.(average);
+
+        // Track peak volume during recording for silence detection
+        if (this.pipelineState === "recording" && average > this.peakVolumeDuringChunk) {
+          this.peakVolumeDuringChunk = average;
+        }
       }, 150);
     } catch (err) {
       console.warn("[native-voice] Volume monitor setup failed (cosmetic only):", err);
