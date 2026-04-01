@@ -60,6 +60,13 @@ export class NativeVoiceService {
   private volumeAnalyser: AnalyserNode | null = null;
   private volumeInterval: number | null = null;
 
+  // -- Pre-unlocked audio resources (from unlockAudio tap gate) --
+  private preUnlockedStream: MediaStream | null = null;
+  private preUnlockedContext: AudioContext | null = null;
+
+  // -- Visibility state listener --
+  private visibilityHandler: (() => void) | null = null;
+
   // -- STT mode --
   private sttMode: SttMode = "speech-recognition";
 
@@ -80,6 +87,85 @@ export class NativeVoiceService {
 
   get isConnected(): boolean {
     return this._isConnected;
+  }
+
+  // ===================================================================
+  // PHASE 1: unlockAudio() — MUST be called synchronously from user tap
+  // BEFORE any async work (agent.start, connect, etc.).
+  // This grabs the mic and unlocks AudioContext in the direct gesture context.
+  // ===================================================================
+
+  /**
+   * Call this SYNCHRONOUSLY from the user's tap/click handler,
+   * BEFORE any awaits. This ensures getUserMedia and AudioContext
+   * are opened in the direct user gesture context, which iOS requires.
+   *
+   * Usage in VoiceAssistant.tsx:
+   *   const native = new NativeVoiceService();
+   *   native.unlockAudio();   // <-- sync, in tap context
+   *   await agent.start();    // <-- async work
+   *   await native.connect(callbacks);  // reuses pre-unlocked resources
+   */
+  unlockAudio(): void {
+    console.log("[native-voice] unlockAudio() — tap gate, grabbing mic + AudioContext in gesture context");
+
+    // PHASE 5: HTTPS protocol check
+    if (typeof window !== "undefined" && window.location.protocol !== "https:" && window.location.hostname !== "localhost") {
+      console.error("[native-voice] ⚠️ Not on HTTPS! getUserMedia requires a secure context. Protocol:", window.location.protocol);
+    }
+
+    // 1. Grab mic immediately — this is the critical one for iOS
+    try {
+      navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      }).then((stream) => {
+        console.log("[native-voice] unlockAudio: mic stream acquired OK");
+        this.preUnlockedStream = stream;
+      }).catch((err) => {
+        console.error("[native-voice] unlockAudio: mic grab failed:", err);
+        // Will retry in connect()
+      });
+    } catch (err) {
+      console.error("[native-voice] unlockAudio: getUserMedia threw synchronously:", err);
+    }
+
+    // 2. Create and unlock AudioContext in gesture context
+    try {
+      this.preUnlockedContext = new AudioContext();
+      // resume() in gesture context ensures it's not suspended on iOS
+      this.preUnlockedContext.resume().catch((e) =>
+        console.warn("[native-voice] unlockAudio: AudioContext resume failed:", e)
+      );
+
+      // Play a silent buffer to fully unlock iOS audio output
+      try {
+        const silentBuffer = this.preUnlockedContext.createBuffer(1, 1, 22050);
+        const silentSource = this.preUnlockedContext.createBufferSource();
+        silentSource.buffer = silentBuffer;
+        silentSource.connect(this.preUnlockedContext.destination);
+        silentSource.start(0);
+        console.log("[native-voice] unlockAudio: silent buffer played");
+      } catch (e) {
+        console.warn("[native-voice] unlockAudio: silent buffer failed:", e);
+      }
+    } catch (err) {
+      console.error("[native-voice] unlockAudio: AudioContext creation failed:", err);
+    }
+
+    // 3. Pre-warm browser speechSynthesis in gesture context
+    if ("speechSynthesis" in window) {
+      try {
+        const warmup = new SpeechSynthesisUtterance("");
+        warmup.volume = 0;
+        window.speechSynthesis.speak(warmup);
+      } catch (e) {
+        console.warn("[native-voice] unlockAudio: speechSynthesis warmup failed:", e);
+      }
+    }
   }
 
   async connect(callbacks: NativeVoiceCallbacks): Promise<void> {
@@ -104,38 +190,74 @@ export class NativeVoiceService {
     console.log("[native-voice] STT mode:", this.sttMode, "isPWA:", isPWA);
 
     try {
-      // Request microphone
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
+      // PHASE 1: Reuse pre-unlocked mic stream from unlockAudio() if available.
+      // This is critical for iOS — the stream was acquired in the gesture context.
+      if (this.preUnlockedStream) {
+        const tracks = this.preUnlockedStream.getAudioTracks();
+        if (tracks.length > 0 && tracks[0].readyState === "live") {
+          console.log("[native-voice] Reusing pre-unlocked mic stream from tap gate");
+          this.mediaStream = this.preUnlockedStream;
+          this.preUnlockedStream = null;
+        } else {
+          console.warn("[native-voice] Pre-unlocked stream dead, requesting fresh one");
+          this.preUnlockedStream = null;
+          this.mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+        }
+      } else {
+        // Fallback: no pre-unlocked stream (unlockAudio wasn't called or failed)
+        console.log("[native-voice] No pre-unlocked stream, requesting mic now");
+        this.mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      }
 
       // Set up volume monitoring (cosmetic only — recording does NOT depend on this)
       this.setupVolumeMonitor(this.mediaStream);
 
-      // Pre-warm playback AudioContext for iOS
-      this.playbackContext = new AudioContext();
-      await this.playbackContext.resume();
+      // PHASE 1: Reuse pre-unlocked AudioContext for playback if available
+      if (this.preUnlockedContext && this.preUnlockedContext.state !== "closed") {
+        console.log("[native-voice] Reusing pre-unlocked AudioContext for playback");
+        this.playbackContext = this.preUnlockedContext;
+        this.preUnlockedContext = null;
+        // Ensure it's running
+        if (this.playbackContext.state === "suspended") {
+          await this.playbackContext.resume();
+        }
+      } else {
+        // Fallback: create fresh
+        this.preUnlockedContext = null;
+        this.playbackContext = new AudioContext();
+        await this.playbackContext.resume();
 
-      // Play silent buffer to unlock iOS audio
-      try {
-        const silentBuffer = this.playbackContext.createBuffer(1, 1, 22050);
-        const silentSource = this.playbackContext.createBufferSource();
-        silentSource.buffer = silentBuffer;
-        silentSource.connect(this.playbackContext.destination);
-        silentSource.start(0);
-      } catch (e) {
-        console.warn("[native-voice] Silent buffer play failed:", e);
+        // Play silent buffer to unlock iOS audio
+        try {
+          const silentBuffer = this.playbackContext.createBuffer(1, 1, 22050);
+          const silentSource = this.playbackContext.createBufferSource();
+          silentSource.buffer = silentBuffer;
+          silentSource.connect(this.playbackContext.destination);
+          silentSource.start(0);
+        } catch (e) {
+          console.warn("[native-voice] Silent buffer play failed:", e);
+        }
       }
 
-      // Pre-warm browser speechSynthesis (fallback TTS)
+      // Pre-warm browser speechSynthesis (fallback TTS) — may already be done by unlockAudio
       if ("speechSynthesis" in window) {
-        const warmup = new SpeechSynthesisUtterance("");
-        warmup.volume = 0;
-        window.speechSynthesis.speak(warmup);
+        try {
+          const warmup = new SpeechSynthesisUtterance("");
+          warmup.volume = 0;
+          window.speechSynthesis.speak(warmup);
+        } catch { /* ignore */ }
       }
 
       // Detect supported MIME type for MediaRecorder
@@ -143,6 +265,9 @@ export class NativeVoiceService {
         this.supportedMimeType = this.getSupportedMimeType();
         console.log("[native-voice] MediaRecorder MIME:", this.supportedMimeType);
       }
+
+      // PHASE 3: Set up visibility change listener to re-init audio when app resumes from background
+      this.setupVisibilityListener();
 
       // For speech-recognition mode, start immediately.
       // For media-recorder mode, wait until after greeting (sendGreeting).
@@ -164,6 +289,73 @@ export class NativeVoiceService {
       callbacks.onError?.(err.message || "Connection failed");
       callbacks.onStatusChange?.("Failed to connect");
       throw err;
+    }
+  }
+
+  // ===================================================================
+  // PHASE 3: Visibility change listener — re-init audio when app resumes
+  // ===================================================================
+
+  /**
+   * When an iOS PWA goes to background and comes back, AudioContext gets
+   * suspended and MediaStream tracks may die. This listener detects resume
+   * and re-initializes everything.
+   */
+  private setupVisibilityListener(): void {
+    // Remove old listener if any
+    this.removeVisibilityListener();
+
+    this.visibilityHandler = () => {
+      if (document.visibilityState === "visible" && this._isConnected) {
+        console.log("[native-voice] App resumed from background — checking audio health");
+
+        // Resume AudioContext (for volume monitor)
+        if (this.audioContext && this.audioContext.state === "suspended") {
+          console.log("[native-voice] Resuming volume AudioContext after background");
+          this.audioContext.resume().catch((e) =>
+            console.warn("[native-voice] Volume AudioContext resume failed:", e)
+          );
+        }
+
+        // Resume playback AudioContext
+        if (this.playbackContext && this.playbackContext.state === "suspended") {
+          console.log("[native-voice] Resuming playback AudioContext after background");
+          this.playbackContext.resume().catch((e) =>
+            console.warn("[native-voice] Playback AudioContext resume failed:", e)
+          );
+        }
+
+        // Check if mic stream is still alive — if dead, try to get a fresh one
+        const tracks = this.mediaStream?.getAudioTracks();
+        if (!tracks || tracks.length === 0 || tracks[0].readyState !== "live") {
+          console.warn("[native-voice] Mic stream died during background — refreshing");
+          this.refreshMicStream().then(() => {
+            // Restart recording if we were idle
+            if (this.pipelineState === "idle" && this.shouldRestart && this.sttMode === "media-recorder") {
+              this.startRecordingChunk();
+            }
+          }).catch((err) => {
+            console.error("[native-voice] Mic refresh after background failed:", err);
+            this.callbacks.onStatusChange?.("Mic lost — tap Stop and retry");
+          });
+        } else {
+          console.log("[native-voice] Mic stream still alive after background");
+          // Restart recording if it was stopped by going to background
+          if (this.pipelineState === "idle" && this.shouldRestart && this.sttMode === "media-recorder") {
+            this.startRecordingChunk();
+          }
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", this.visibilityHandler);
+    console.log("[native-voice] Visibility change listener registered");
+  }
+
+  private removeVisibilityListener(): void {
+    if (this.visibilityHandler) {
+      document.removeEventListener("visibilitychange", this.visibilityHandler);
+      this.visibilityHandler = null;
     }
   }
 
@@ -285,16 +477,35 @@ export class NativeVoiceService {
 
     // Verify media stream is alive
     if (!this.mediaStream) {
-      console.warn("[native-voice] No media stream, cannot record");
-      this.callbacks.onStatusChange?.("Mic error — tap to retry");
+      console.warn("[native-voice] No media stream, cannot record — attempting refresh");
+      this.refreshMicStream().then(() => {
+        if (this.mediaStream && this._isConnected && this.shouldRestart && this.pipelineState === "idle") {
+          this.startRecordingChunk();
+        } else {
+          this.callbacks.onStatusChange?.("Mic error — tap to retry");
+        }
+      }).catch(() => {
+        this.callbacks.onStatusChange?.("Mic error — tap to retry");
+      });
       return;
     }
     const tracks = this.mediaStream.getAudioTracks();
     if (tracks.length === 0 || tracks[0].readyState !== "live") {
-      console.warn("[native-voice] Media stream tracks not live:", tracks[0]?.readyState);
-      this.callbacks.onStatusChange?.("Mic error — tap to retry");
+      console.warn("[native-voice] Media stream tracks not live:", tracks[0]?.readyState, "— attempting refresh");
+      this.refreshMicStream().then(() => {
+        if (this.mediaStream && this._isConnected && this.shouldRestart && this.pipelineState === "idle") {
+          this.startRecordingChunk();
+        } else {
+          this.callbacks.onStatusChange?.("Mic error — tap to retry");
+        }
+      }).catch(() => {
+        this.callbacks.onStatusChange?.("Mic error — tap to retry");
+      });
       return;
     }
+
+    // PHASE 4: Check mic permission (non-blocking, just logs)
+    this.checkMicPermission();
 
     this.pipelineState = "recording";
     this.callbacks.onStatusChange?.("Listening...");
@@ -708,6 +919,10 @@ export class NativeVoiceService {
   private async speakText(text: string): Promise<void> {
     const MAX_CLIENT_RETRIES = 2;
 
+    // PHASE 2: Ensure playback AudioContext is alive and running before any TTS attempt.
+    // iOS suspends AudioContext when app backgrounds or after prolonged inactivity.
+    await this.ensurePlaybackContext();
+
     for (let attempt = 1; attempt <= MAX_CLIENT_RETRIES; attempt++) {
       if (!this._isConnected) return;
 
@@ -734,7 +949,8 @@ export class NativeVoiceService {
               console.warn("[native-voice] <audio> element failed, trying AudioContext:", e);
             }
 
-            // Try 2: AudioContext
+            // Try 2: AudioContext (resume again just in case)
+            await this.ensurePlaybackContext();
             try {
               await this.playAudioBuffer(audioData);
               console.log("[native-voice] AudioContext playback succeeded");
@@ -768,6 +984,32 @@ export class NativeVoiceService {
       await this.speakWithBrowserTTS(text);
     } catch (err) {
       console.error("[native-voice] All TTS methods failed:", err);
+    }
+  }
+
+  /**
+   * PHASE 2: Ensure the playback AudioContext exists and is in "running" state.
+   * iOS suspends AudioContext on background, page visibility changes, or after TTS.
+   */
+  private async ensurePlaybackContext(): Promise<void> {
+    try {
+      if (!this.playbackContext || this.playbackContext.state === "closed") {
+        console.log("[native-voice] Creating fresh playback AudioContext");
+        this.playbackContext = new AudioContext();
+      }
+      if (this.playbackContext.state === "suspended") {
+        console.log("[native-voice] Resuming suspended playback AudioContext");
+        await this.playbackContext.resume();
+      }
+    } catch (err) {
+      console.warn("[native-voice] ensurePlaybackContext failed:", err);
+      // Try creating a brand new one
+      try {
+        this.playbackContext = new AudioContext();
+        await this.playbackContext.resume();
+      } catch (e) {
+        console.error("[native-voice] Cannot create AudioContext at all:", e);
+      }
     }
   }
 
@@ -945,6 +1187,35 @@ export class NativeVoiceService {
   }
 
   // ===================================================================
+  // PHASE 4: Mic permission check (non-blocking diagnostic)
+  // ===================================================================
+
+  /**
+   * Check microphone permission status via Permissions API.
+   * Non-blocking — just logs the current state for diagnostics.
+   * Helps identify when iOS has revoked mic permission silently.
+   */
+  private checkMicPermission(): void {
+    try {
+      if (navigator.permissions && navigator.permissions.query) {
+        navigator.permissions.query({ name: "microphone" as PermissionName }).then((result) => {
+          console.log("[native-voice] Mic permission status:", result.state);
+          if (result.state === "denied") {
+            console.error("[native-voice] ⚠️ Mic permission DENIED — recording will fail");
+            this.callbacks.onStatusChange?.("Mic permission denied");
+            this.callbacks.onError?.("Microphone permission denied. Please allow microphone access in Settings.");
+          }
+        }).catch((e) => {
+          // Permissions API not available for microphone on this browser — that's OK
+          console.log("[native-voice] Permissions API not available for mic:", e.message);
+        });
+      }
+    } catch {
+      // Ignore — Permissions API may not exist
+    }
+  }
+
+  // ===================================================================
   // Disconnect
   // ===================================================================
 
@@ -954,6 +1225,17 @@ export class NativeVoiceService {
     this._isConnected = false;
     this.greetingDone = false;
     this.pipelineState = "idle";
+
+    // Remove visibility listener
+    this.removeVisibilityListener();
+
+    // Clean up pre-unlocked resources if they weren't consumed
+    if (this.preUnlockedStream) {
+      this.preUnlockedStream.getTracks().forEach(t => t.stop());
+      this.preUnlockedStream = null;
+    }
+    try { this.preUnlockedContext?.close(); } catch { /* ignore */ }
+    this.preUnlockedContext = null;
 
     // Clear timers
     this.stopVolumeMonitor();

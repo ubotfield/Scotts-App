@@ -124,8 +124,22 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
       useNativeRef.current = shouldUseNativeVoice();
       console.log("[voice] Platform:", useNativeRef.current ? "native (Web Speech)" : "desktop (Gemini Live)");
 
+      // ═══════════════════════════════════════════════════════
+      // iOS PWA FIX: Call unlockAudio() SYNCHRONOUSLY here,
+      // in the DIRECT user gesture (tap) context.
+      // This grabs the mic and unlocks AudioContext BEFORE
+      // any async work (agent.start, connect) breaks the
+      // gesture chain that iOS requires.
+      // ═══════════════════════════════════════════════════════
+      let preCreatedNative: NativeVoiceService | null = null;
+      if (useNativeRef.current) {
+        preCreatedNative = new NativeVoiceService();
+        preCreatedNative.unlockAudio(); // SYNC — in tap context
+        nativeRef.current = preCreatedNative;
+      }
+
       try {
-        // 1. Start Agentforce session
+        // 1. Start Agentforce session (async — mic already grabbed above)
         const agent = new AgentforceSession();
         await agent.start();
         agentRef.current = agent;
@@ -195,7 +209,8 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
 
         // 2. Start voice service based on platform
         if (useNativeRef.current) {
-          const native = new NativeVoiceService();
+          // Reuse the pre-created native service (unlockAudio already called in tap context)
+          const native = preCreatedNative || new NativeVoiceService();
           nativeRef.current = native;
           await native.connect(voiceCallbacks);
         } else {
