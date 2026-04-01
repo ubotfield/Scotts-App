@@ -360,12 +360,12 @@ app.post("/api/tts", async (req, res) => {
           },
           body: JSON.stringify({
             text,
-            model_id: "eleven_multilingual_v2",
+            model_id: "eleven_turbo_v2_5",
             voice_settings: {
-              stability: 0.5,
-              similarity_boost: 0.75,
+              stability: 0.75,
+              similarity_boost: 0.65,
               style: 0.0,
-              speed: 1.0,
+              speed: 1.05,
             },
           }),
           signal: controller.signal,

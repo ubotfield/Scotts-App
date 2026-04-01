@@ -17,29 +17,9 @@
 
 import { apiUrl } from "./api-base";
 
-// ═══════════════════════════════════════════════════════════════
-// DEBUG LOG — visible on-screen overlay for iOS PWA diagnosis.
-// Shows last 12 log lines directly on the page.
-// Remove this after debugging is complete.
-// ═══════════════════════════════════════════════════════════════
-const DEBUG_LOG: string[] = [];
+/** Lightweight debug logger — console only, no on-screen overlay */
 function dbg(msg: string): void {
-  const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  const line = `${ts} ${msg}`;
-  console.log(`[dbg] ${msg}`);
-  DEBUG_LOG.push(line);
-  if (DEBUG_LOG.length > 12) DEBUG_LOG.shift();
-
-  // Render to on-screen overlay
-  let el = document.getElementById("voice-debug-log");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "voice-debug-log";
-    el.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:rgba(0,0,0,0.85);color:#0f0;font:10px/1.3 monospace;padding:6px 8px;max-height:35vh;overflow-y:auto;pointer-events:none;white-space:pre-wrap;";
-    document.body.appendChild(el);
-  }
-  el.textContent = DEBUG_LOG.join("\n");
-  el.scrollTop = el.scrollHeight;
+  console.log(`[native-voice] ${msg}`);
 }
 
 export interface NativeVoiceCallbacks {
@@ -469,7 +449,7 @@ export class NativeVoiceService {
   // Uses simple timer-based 4-second recording chunks.
   // ===================================================================
 
-  private static readonly CHUNK_DURATION_MS = 6000;
+  private static readonly CHUNK_DURATION_MS = 4000;
   private static readonly MIN_AUDIO_SIZE = 2000; // bytes — skip tiny recordings
 
   /**
@@ -633,7 +613,7 @@ export class NativeVoiceService {
       if (this.shouldRestart && this._isConnected && this.pipelineState === "idle") {
         this.startRecordingChunk();
       }
-    }, 300);
+    }, 150);
   }
 
   /**
@@ -767,7 +747,7 @@ export class NativeVoiceService {
     await this.speakText(greetingResponse);
     dbg("Greeting TTS done");
 
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 150));
 
     this.greetingDone = true;
     this.pipelineState = "idle";
@@ -911,7 +891,7 @@ export class NativeVoiceService {
 
           if (!this._isConnected) return;
 
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 150));
           this.shouldRestart = true;
           await this.resumeListening();
         } else {
@@ -937,7 +917,7 @@ export class NativeVoiceService {
       }
       if (this._isConnected) {
         this.shouldRestart = true;
-        await new Promise(r => setTimeout(r, 300));
+        await new Promise(r => setTimeout(r, 150));
         await this.resumeListening();
       }
     } finally {
@@ -999,14 +979,14 @@ export class NativeVoiceService {
         } else {
           console.warn(`[native-voice] Server TTS HTTP ${res.status} (attempt ${attempt})`);
           if (attempt < MAX_CLIENT_RETRIES) {
-            await new Promise(r => setTimeout(r, 300));
+            await new Promise(r => setTimeout(r, 150));
             continue;
           }
         }
       } catch (err) {
         console.warn(`[native-voice] Server TTS error (attempt ${attempt}):`, err);
         if (attempt < MAX_CLIENT_RETRIES) {
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 150));
           continue;
         }
       }
@@ -1137,6 +1117,18 @@ export class NativeVoiceService {
 
     const audioBuffer = await this.playbackContext.decodeAudioData(data.slice(0));
 
+    // Add a DynamicsCompressor to normalize volume (prevents oscillation)
+    const compressor = this.playbackContext.createDynamicsCompressor();
+    compressor.threshold.setValueAtTime(-20, this.playbackContext.currentTime);
+    compressor.knee.setValueAtTime(10, this.playbackContext.currentTime);
+    compressor.ratio.setValueAtTime(8, this.playbackContext.currentTime);
+    compressor.attack.setValueAtTime(0.003, this.playbackContext.currentTime);
+    compressor.release.setValueAtTime(0.15, this.playbackContext.currentTime);
+
+    // Add a GainNode for consistent output level
+    const gainNode = this.playbackContext.createGain();
+    gainNode.gain.setValueAtTime(1.3, this.playbackContext.currentTime);
+
     return new Promise<void>((resolve, reject) => {
       let settled = false;
       const finish = () => {
@@ -1155,7 +1147,10 @@ export class NativeVoiceService {
       try {
         const source = this.playbackContext!.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(this.playbackContext!.destination);
+        // Route: source → compressor → gain → speakers
+        source.connect(compressor);
+        compressor.connect(gainNode);
+        gainNode.connect(this.playbackContext!.destination);
         source.onended = () => finish();
         source.start();
       } catch (err) {
