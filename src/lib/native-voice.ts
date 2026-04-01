@@ -75,11 +75,8 @@ export class NativeVoiceService {
   // Safety
   private pipelineSafetyTimer: number | null = null;
 
-  // Volume tracking for silence detection
+  // Volume tracking (cosmetic — for UI volume bars only)
   private peakVolumeDuringChunk = 0;
-  private consecutiveSilentChunks = 0;
-  private static readonly SILENCE_THRESHOLD = 0.005; // very low — only skip truly silent chunks
-  private static readonly MAX_SILENT_SKIPS = 2; // after 2 silent skips, force STT anyway
 
   get isConnected(): boolean {
     return this._isConnected;
@@ -302,7 +299,6 @@ export class NativeVoiceService {
     this.pipelineState = "recording";
     this.callbacks.onStatusChange?.("Listening...");
     this.recordedChunks = [];
-    this.peakVolumeDuringChunk = 0; // Reset volume tracking for this chunk
 
     console.log("[native-voice] Starting recording chunk (", NativeVoiceService.CHUNK_DURATION_MS, "ms)");
 
@@ -333,7 +329,7 @@ export class NativeVoiceService {
     };
 
     this.mediaRecorder.onstop = () => {
-      console.log("[native-voice] MediaRecorder stopped, chunks:", this.recordedChunks.length, "peakVol:", this.peakVolumeDuringChunk.toFixed(3));
+      console.log("[native-voice] MediaRecorder stopped, chunks:", this.recordedChunks.length);
       this.clearChunkTimer();
 
       if (this.recordedChunks.length > 0 && this.pipelineState === "recording") {
@@ -341,18 +337,7 @@ export class NativeVoiceService {
         const blob = new Blob(this.recordedChunks, { type: actualMime });
         this.recordedChunks = [];
 
-        // Skip STT if chunk was truly silent AND we haven't skipped too many in a row
-        const isSilent = this.peakVolumeDuringChunk < NativeVoiceService.SILENCE_THRESHOLD;
-        const tooManySilentSkips = this.consecutiveSilentChunks >= NativeVoiceService.MAX_SILENT_SKIPS;
-
-        if (isSilent && !tooManySilentSkips) {
-          this.consecutiveSilentChunks++;
-          console.log("[native-voice] Silent chunk (peak:", this.peakVolumeDuringChunk.toFixed(4), "), skip #" + this.consecutiveSilentChunks);
-          this.pipelineState = "idle";
-          this.scheduleNextChunk();
-        } else if (blob.size > NativeVoiceService.MIN_AUDIO_SIZE) {
-          // Reset silent counter — we're sending this chunk
-          this.consecutiveSilentChunks = 0;
+        if (blob.size > NativeVoiceService.MIN_AUDIO_SIZE) {
           console.log("[native-voice] Sending", Math.round(blob.size / 1024), "KB for transcription");
           this.pipelineState = "transcribing";
           this.transcribeAndRoute(blob, actualMime);
