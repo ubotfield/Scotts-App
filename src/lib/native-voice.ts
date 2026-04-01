@@ -17,6 +17,31 @@
 
 import { apiUrl } from "./api-base";
 
+// ═══════════════════════════════════════════════════════════════
+// DEBUG LOG — visible on-screen overlay for iOS PWA diagnosis.
+// Shows last 12 log lines directly on the page.
+// Remove this after debugging is complete.
+// ═══════════════════════════════════════════════════════════════
+const DEBUG_LOG: string[] = [];
+function dbg(msg: string): void {
+  const ts = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const line = `${ts} ${msg}`;
+  console.log(`[dbg] ${msg}`);
+  DEBUG_LOG.push(line);
+  if (DEBUG_LOG.length > 12) DEBUG_LOG.shift();
+
+  // Render to on-screen overlay
+  let el = document.getElementById("voice-debug-log");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "voice-debug-log";
+    el.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:rgba(0,0,0,0.85);color:#0f0;font:10px/1.3 monospace;padding:6px 8px;max-height:35vh;overflow-y:auto;pointer-events:none;white-space:pre-wrap;";
+    document.body.appendChild(el);
+  }
+  el.textContent = DEBUG_LOG.join("\n");
+  el.scrollTop = el.scrollHeight;
+}
+
 export interface NativeVoiceCallbacks {
   onOpen?: () => void;
   onClose?: () => void;
@@ -106,54 +131,55 @@ export class NativeVoiceService {
    *   await agent.start();    // <-- async work
    *   await native.connect(callbacks);  // reuses pre-unlocked resources
    */
+  /**
+   * Promise that resolves when the pre-unlocked mic stream is ready.
+   * connect() awaits this to avoid the race condition.
+   */
+  private micUnlockPromise: Promise<MediaStream | null> | null = null;
+
   unlockAudio(): void {
-    console.log("[native-voice] unlockAudio() — tap gate, grabbing mic + AudioContext in gesture context");
+    dbg("unlockAudio() called — tap gate");
+    dbg(`protocol: ${window.location.protocol} host: ${window.location.hostname}`);
 
     // PHASE 5: HTTPS protocol check
     if (typeof window !== "undefined" && window.location.protocol !== "https:" && window.location.hostname !== "localhost") {
-      console.error("[native-voice] ⚠️ Not on HTTPS! getUserMedia requires a secure context. Protocol:", window.location.protocol);
+      dbg("⚠️ NOT HTTPS — getUserMedia will fail!");
     }
 
-    // 1. Grab mic immediately — this is the critical one for iOS
-    try {
-      navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      }).then((stream) => {
-        console.log("[native-voice] unlockAudio: mic stream acquired OK");
-        this.preUnlockedStream = stream;
-      }).catch((err) => {
-        console.error("[native-voice] unlockAudio: mic grab failed:", err);
-        // Will retry in connect()
-      });
-    } catch (err) {
-      console.error("[native-voice] unlockAudio: getUserMedia threw synchronously:", err);
-    }
+    // 1. Grab mic immediately — store the Promise so connect() can await it
+    this.micUnlockPromise = navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    }).then((stream) => {
+      dbg(`unlockAudio: mic OK tracks=${stream.getAudioTracks().length} state=${stream.getAudioTracks()[0]?.readyState}`);
+      this.preUnlockedStream = stream;
+      return stream;
+    }).catch((err) => {
+      dbg(`unlockAudio: mic FAILED ${err?.name}: ${err?.message}`);
+      return null;
+    });
 
     // 2. Create and unlock AudioContext in gesture context
     try {
-      this.preUnlockedContext = new AudioContext();
-      // resume() in gesture context ensures it's not suspended on iOS
-      this.preUnlockedContext.resume().catch((e) =>
-        console.warn("[native-voice] unlockAudio: AudioContext resume failed:", e)
+      this.preUnlockedContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      this.preUnlockedContext.resume().then(() => {
+        dbg(`unlockAudio: AudioCtx state=${this.preUnlockedContext?.state}`);
+      }).catch((e) =>
+        dbg(`unlockAudio: AudioCtx resume fail: ${e?.message}`)
       );
 
       // Play a silent buffer to fully unlock iOS audio output
-      try {
-        const silentBuffer = this.preUnlockedContext.createBuffer(1, 1, 22050);
-        const silentSource = this.preUnlockedContext.createBufferSource();
-        silentSource.buffer = silentBuffer;
-        silentSource.connect(this.preUnlockedContext.destination);
-        silentSource.start(0);
-        console.log("[native-voice] unlockAudio: silent buffer played");
-      } catch (e) {
-        console.warn("[native-voice] unlockAudio: silent buffer failed:", e);
-      }
-    } catch (err) {
-      console.error("[native-voice] unlockAudio: AudioContext creation failed:", err);
+      const silentBuffer = this.preUnlockedContext.createBuffer(1, 1, 22050);
+      const silentSource = this.preUnlockedContext.createBufferSource();
+      silentSource.buffer = silentBuffer;
+      silentSource.connect(this.preUnlockedContext.destination);
+      silentSource.start(0);
+      dbg("unlockAudio: silent buffer played");
+    } catch (err: any) {
+      dbg(`unlockAudio: AudioCtx create fail: ${err?.message}`);
     }
 
     // 3. Pre-warm browser speechSynthesis in gesture context
@@ -162,15 +188,14 @@ export class NativeVoiceService {
         const warmup = new SpeechSynthesisUtterance("");
         warmup.volume = 0;
         window.speechSynthesis.speak(warmup);
-      } catch (e) {
-        console.warn("[native-voice] unlockAudio: speechSynthesis warmup failed:", e);
-      }
+      } catch { /* ignore */ }
     }
   }
 
   async connect(callbacks: NativeVoiceCallbacks): Promise<void> {
     this.callbacks = callbacks;
     callbacks.onStatusChange?.("Connecting...");
+    dbg("connect() called");
 
     // Detect STT strategy
     const SpeechRecognition =
@@ -181,92 +206,76 @@ export class NativeVoiceService {
 
     if (isPWA) {
       this.sttMode = "media-recorder";
-      console.log("[native-voice] PWA standalone detected — forcing MediaRecorder mode");
     } else if (SpeechRecognition) {
       this.sttMode = "speech-recognition";
     } else {
       this.sttMode = "media-recorder";
     }
-    console.log("[native-voice] STT mode:", this.sttMode, "isPWA:", isPWA);
+    dbg(`STT mode: ${this.sttMode} isPWA: ${isPWA}`);
 
     try {
-      // PHASE 1: Reuse pre-unlocked mic stream from unlockAudio() if available.
-      // This is critical for iOS — the stream was acquired in the gesture context.
+      // AWAIT the mic unlock promise from unlockAudio() if it's still pending.
+      // This fixes the race condition where connect() runs before the mic promise resolves.
+      if (this.micUnlockPromise) {
+        dbg("Awaiting micUnlockPromise...");
+        const stream = await this.micUnlockPromise;
+        this.micUnlockPromise = null;
+        if (stream) {
+          this.preUnlockedStream = stream;
+          dbg(`micUnlockPromise resolved: tracks=${stream.getAudioTracks().length} state=${stream.getAudioTracks()[0]?.readyState}`);
+        } else {
+          dbg("micUnlockPromise resolved with NULL (failed)");
+        }
+      }
+
+      // Reuse pre-unlocked mic stream if available
       if (this.preUnlockedStream) {
         const tracks = this.preUnlockedStream.getAudioTracks();
         if (tracks.length > 0 && tracks[0].readyState === "live") {
-          console.log("[native-voice] Reusing pre-unlocked mic stream from tap gate");
+          dbg("Reusing pre-unlocked mic stream ✓");
           this.mediaStream = this.preUnlockedStream;
           this.preUnlockedStream = null;
         } else {
-          console.warn("[native-voice] Pre-unlocked stream dead, requesting fresh one");
+          dbg(`Pre-unlocked stream dead (${tracks[0]?.readyState}), requesting fresh`);
           this.preUnlockedStream = null;
           this.mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           });
+          dbg("Fresh mic stream acquired");
         }
       } else {
-        // Fallback: no pre-unlocked stream (unlockAudio wasn't called or failed)
-        console.log("[native-voice] No pre-unlocked stream, requesting mic now");
+        dbg("No pre-unlocked stream, requesting mic now...");
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
         });
+        dbg(`Mic acquired: tracks=${this.mediaStream.getAudioTracks().length}`);
       }
 
-      // Set up volume monitoring (cosmetic only — recording does NOT depend on this)
+      // Set up volume monitoring (cosmetic only)
       this.setupVolumeMonitor(this.mediaStream);
 
-      // PHASE 1: Reuse pre-unlocked AudioContext for playback if available
+      // Reuse pre-unlocked AudioContext for playback if available
       if (this.preUnlockedContext && this.preUnlockedContext.state !== "closed") {
-        console.log("[native-voice] Reusing pre-unlocked AudioContext for playback");
+        dbg(`Reusing pre-unlocked AudioCtx (state=${this.preUnlockedContext.state})`);
         this.playbackContext = this.preUnlockedContext;
         this.preUnlockedContext = null;
-        // Ensure it's running
         if (this.playbackContext.state === "suspended") {
           await this.playbackContext.resume();
         }
       } else {
-        // Fallback: create fresh
         this.preUnlockedContext = null;
-        this.playbackContext = new AudioContext();
+        this.playbackContext = new (window.AudioContext || (window as any).webkitAudioContext)();
         await this.playbackContext.resume();
-
-        // Play silent buffer to unlock iOS audio
-        try {
-          const silentBuffer = this.playbackContext.createBuffer(1, 1, 22050);
-          const silentSource = this.playbackContext.createBufferSource();
-          silentSource.buffer = silentBuffer;
-          silentSource.connect(this.playbackContext.destination);
-          silentSource.start(0);
-        } catch (e) {
-          console.warn("[native-voice] Silent buffer play failed:", e);
-        }
-      }
-
-      // Pre-warm browser speechSynthesis (fallback TTS) — may already be done by unlockAudio
-      if ("speechSynthesis" in window) {
-        try {
-          const warmup = new SpeechSynthesisUtterance("");
-          warmup.volume = 0;
-          window.speechSynthesis.speak(warmup);
-        } catch { /* ignore */ }
+        dbg(`New playback AudioCtx state=${this.playbackContext.state}`);
       }
 
       // Detect supported MIME type for MediaRecorder
       if (this.sttMode === "media-recorder") {
         this.supportedMimeType = this.getSupportedMimeType();
-        console.log("[native-voice] MediaRecorder MIME:", this.supportedMimeType);
+        dbg(`MediaRecorder MIME: ${this.supportedMimeType}`);
       }
 
-      // PHASE 3: Set up visibility change listener to re-init audio when app resumes from background
+      // Set up visibility change listener
       this.setupVisibilityListener();
 
       // For speech-recognition mode, start immediately.
@@ -276,16 +285,18 @@ export class NativeVoiceService {
         this.setupRecognition();
         try {
           this.recognition.start();
-        } catch (e) {
-          console.warn("[native-voice] Initial recognition.start() failed:", e);
+          dbg("SpeechRecognition started");
+        } catch (e: any) {
+          dbg(`recognition.start() failed: ${e?.message}`);
         }
       }
 
       this._isConnected = true;
+      dbg("connect() done — calling onOpen");
       callbacks.onOpen?.();
       callbacks.onStatusChange?.("Connected");
     } catch (err: any) {
-      console.error("[native-voice] Failed to connect:", err);
+      dbg(`connect() FAILED: ${err?.name}: ${err?.message}`);
       callbacks.onError?.(err.message || "Connection failed");
       callbacks.onStatusChange?.("Failed to connect");
       throw err;
@@ -466,32 +477,36 @@ export class NativeVoiceService {
    * then stops and sends to STT. Creates a fresh MediaRecorder each time.
    */
   private startRecordingChunk(): void {
+    dbg(`startRecordingChunk: conn=${this._isConnected} restart=${this.shouldRestart} pipe=${this.pipelineState}`);
+
     if (!this._isConnected || !this.shouldRestart) {
-      console.log("[native-voice] Not starting chunk: connected:", this._isConnected, "shouldRestart:", this.shouldRestart);
+      dbg("⚠️ Not starting chunk — disconnected or stopped");
       return;
     }
     if (this.pipelineState !== "idle") {
-      console.log("[native-voice] Not starting chunk: pipeline state is", this.pipelineState);
+      dbg(`⚠️ Not starting chunk — pipeline=${this.pipelineState}`);
       return;
     }
 
     // Verify media stream is alive
     if (!this.mediaStream) {
-      console.warn("[native-voice] No media stream, cannot record — attempting refresh");
+      dbg("⚠️ No media stream — refreshing...");
       this.refreshMicStream().then(() => {
         if (this.mediaStream && this._isConnected && this.shouldRestart && this.pipelineState === "idle") {
           this.startRecordingChunk();
         } else {
           this.callbacks.onStatusChange?.("Mic error — tap to retry");
+          dbg("⚠️ Mic refresh failed to produce usable stream");
         }
       }).catch(() => {
         this.callbacks.onStatusChange?.("Mic error — tap to retry");
+        dbg("⚠️ refreshMicStream threw");
       });
       return;
     }
     const tracks = this.mediaStream.getAudioTracks();
     if (tracks.length === 0 || tracks[0].readyState !== "live") {
-      console.warn("[native-voice] Media stream tracks not live:", tracks[0]?.readyState, "— attempting refresh");
+      dbg(`⚠️ Tracks not live: ${tracks[0]?.readyState} — refreshing...`);
       this.refreshMicStream().then(() => {
         if (this.mediaStream && this._isConnected && this.shouldRestart && this.pipelineState === "idle") {
           this.startRecordingChunk();
@@ -504,14 +519,14 @@ export class NativeVoiceService {
       return;
     }
 
-    // PHASE 4: Check mic permission (non-blocking, just logs)
+    // PHASE 4: Check mic permission (non-blocking)
     this.checkMicPermission();
 
     this.pipelineState = "recording";
     this.callbacks.onStatusChange?.("Listening...");
     this.recordedChunks = [];
 
-    console.log("[native-voice] Starting recording chunk (", NativeVoiceService.CHUNK_DURATION_MS, "ms)");
+    dbg(`Recording ${NativeVoiceService.CHUNK_DURATION_MS}ms chunk...`);
 
     try {
       const options: MediaRecorderOptions = this.supportedMimeType
@@ -519,13 +534,15 @@ export class NativeVoiceService {
         : { audioBitsPerSecond: 64000 };
 
       this.mediaRecorder = new MediaRecorder(this.mediaStream, options);
-    } catch (err) {
-      console.warn("[native-voice] MediaRecorder with MIME failed, trying default:", err);
+      dbg(`MediaRecorder created OK, mimeType=${this.mediaRecorder.mimeType}`);
+    } catch (err: any) {
+      dbg(`MediaRecorder MIME fail: ${err?.message}, trying default`);
       try {
         this.mediaRecorder = new MediaRecorder(this.mediaStream);
         this.supportedMimeType = this.mediaRecorder.mimeType || "audio/mp4";
-      } catch (err2) {
-        console.error("[native-voice] MediaRecorder completely failed:", err2);
+        dbg(`MediaRecorder fallback OK, mimeType=${this.mediaRecorder.mimeType}`);
+      } catch (err2: any) {
+        dbg(`⚠️ MediaRecorder TOTALLY FAILED: ${err2?.message}`);
         this.pipelineState = "idle";
         this.callbacks.onStatusChange?.("Voice not available");
         this.callbacks.onError?.("Cannot record audio on this device");
@@ -540,24 +557,25 @@ export class NativeVoiceService {
     };
 
     this.mediaRecorder.onstop = () => {
-      console.log("[native-voice] MediaRecorder stopped, chunks:", this.recordedChunks.length);
+      const chunkCount = this.recordedChunks.length;
       this.clearChunkTimer();
 
-      if (this.recordedChunks.length > 0 && this.pipelineState === "recording") {
+      if (chunkCount > 0 && this.pipelineState === "recording") {
         const actualMime = this.mediaRecorder?.mimeType || this.supportedMimeType;
         const blob = new Blob(this.recordedChunks, { type: actualMime });
         this.recordedChunks = [];
 
         if (blob.size > NativeVoiceService.MIN_AUDIO_SIZE) {
-          console.log("[native-voice] Sending", Math.round(blob.size / 1024), "KB for transcription");
+          dbg(`Chunk done: ${Math.round(blob.size / 1024)}KB → STT`);
           this.pipelineState = "transcribing";
           this.transcribeAndRoute(blob, actualMime);
         } else {
-          console.log("[native-voice] Audio too short (", blob.size, "bytes), restarting");
+          dbg(`Chunk too small (${blob.size}B), skip → next`);
           this.pipelineState = "idle";
           this.scheduleNextChunk();
         }
       } else {
+        dbg(`Recorder stopped: ${chunkCount} chunks, pipe=${this.pipelineState}`);
         this.recordedChunks = [];
         if (this.pipelineState === "recording") {
           this.pipelineState = "idle";
@@ -567,6 +585,7 @@ export class NativeVoiceService {
     };
 
     this.mediaRecorder.onerror = (event: any) => {
+      dbg(`⚠️ MediaRecorder error: ${event.error?.name || event.error || "unknown"}`);
       console.error("[native-voice] MediaRecorder error:", event.error || event);
       this.clearChunkTimer();
       this.pipelineState = "idle";
@@ -574,17 +593,25 @@ export class NativeVoiceService {
     };
 
     // Start recording with timeslice (collects data every 250ms)
-    this.mediaRecorder.start(250);
+    try {
+      this.mediaRecorder.start(250);
+      dbg(`MediaRecorder.start(250) OK, state=${this.mediaRecorder.state}`);
+    } catch (startErr: any) {
+      dbg(`⚠️ MediaRecorder.start FAILED: ${startErr?.message}`);
+      this.pipelineState = "idle";
+      this.scheduleNextChunk();
+      return;
+    }
 
     // Timer to stop recording after CHUNK_DURATION_MS
     this.chunkTimer = window.setTimeout(() => {
       this.chunkTimer = null;
       if (this.mediaRecorder && this.mediaRecorder.state !== "inactive") {
-        console.log("[native-voice] Chunk timer fired, stopping recorder");
+        dbg("Chunk timer fired → stopping recorder");
         try {
           this.mediaRecorder.stop();
-        } catch (e) {
-          console.warn("[native-voice] Stop error:", e);
+        } catch (e: any) {
+          dbg(`⚠️ recorder.stop() error: ${e?.message}`);
           this.pipelineState = "idle";
           this.scheduleNextChunk();
         }
@@ -614,10 +641,12 @@ export class NativeVoiceService {
    * On completion (or failure), restart the recording pipeline.
    */
   private async transcribeAndRoute(blob: Blob, mimeType: string): Promise<void> {
-    // Safety timeout: if transcription + agent + TTS takes > 45s, force reset
+    dbg(`transcribeAndRoute: ${Math.round(blob.size / 1024)}KB ${mimeType}`);
+
+    // Safety timeout
     this.clearPipelineSafety();
     this.pipelineSafetyTimer = window.setTimeout(() => {
-      console.error("[native-voice] ⚠️ Pipeline stuck for 45s — force resetting");
+      dbg("⚠️ Pipeline stuck 45s — force reset");
       this.pipelineState = "idle";
       if (this._isConnected) {
         this.callbacks.onStatusChange?.("Listening...");
@@ -626,13 +655,8 @@ export class NativeVoiceService {
     }, 45000);
 
     try {
-      // Don't show "Processing..." yet — keep "Listening..." until we confirm speech was detected.
-      // This prevents the visible Listening ↔ Processing loop on silent chunks.
-
-      // Convert blob to base64
       const base64 = await this.blobToBase64(blob);
-
-      console.log("[native-voice] Sending audio for STT:", Math.round(blob.size / 1024), "KB");
+      dbg(`Sending ${Math.round(blob.size / 1024)}KB to /api/stt`);
       const sttStart = Date.now();
 
       const res = await fetch(apiUrl("/api/stt"), {
@@ -644,10 +668,11 @@ export class NativeVoiceService {
         }),
       });
 
-      console.log("[native-voice] STT response in", Date.now() - sttStart, "ms, status:", res.status);
+      const sttMs = Date.now() - sttStart;
+      dbg(`STT response: ${res.status} in ${sttMs}ms`);
 
       if (!res.ok) {
-        console.error("[native-voice] STT request failed:", res.status);
+        dbg(`⚠️ STT failed HTTP ${res.status}`);
         this.pipelineState = "idle";
         this.scheduleNextChunk();
         return;
@@ -657,8 +682,8 @@ export class NativeVoiceService {
       const text = data.text?.trim();
 
       if (text && text.length > 0) {
-        console.log("[native-voice] STT result:", text);
-        this.callbacks.onStatusChange?.("Processing..."); // NOW show Processing — we have actual speech
+        dbg(`STT text: "${text.substring(0, 50)}"`);
+        this.callbacks.onStatusChange?.("Processing...");
         await this.routeToAgent(text);
       } else {
         console.log("[native-voice] No speech detected, restarting");
@@ -715,26 +740,28 @@ export class NativeVoiceService {
   // ===================================================================
 
   async sendGreeting(greetingResponse: string): Promise<void> {
+    dbg(`sendGreeting called, text=${greetingResponse ? greetingResponse.substring(0, 40) + "..." : "(empty)"}`);
+
     if (!greetingResponse) {
       this.greetingDone = true;
       if (this.sttMode === "media-recorder") {
+        dbg("Empty greeting — starting recording immediately");
         this.startRecordingChunk();
       }
       return;
     }
 
-    console.log("[native-voice] Speaking greeting:", greetingResponse.substring(0, 80));
     this.callbacks.onStatusChange?.("Speaking...");
     this.pipelineState = "speaking";
 
-    // For speech-recognition mode, pause while speaking
     if (this.sttMode === "speech-recognition") {
       this.pauseListening();
     }
 
+    dbg("Speaking greeting via TTS...");
     await this.speakText(greetingResponse);
+    dbg("Greeting TTS done");
 
-    // Small delay before starting/resuming listening
     await new Promise(r => setTimeout(r, 300));
 
     this.greetingDone = true;
@@ -743,13 +770,16 @@ export class NativeVoiceService {
     if (this.sttMode === "speech-recognition") {
       await this.resumeListening();
     } else {
-      // CRITICAL: Get a FRESH mic stream after TTS playback.
-      // iOS corrupts the audio session after playback.
+      dbg("Refreshing mic stream after greeting...");
       await this.refreshMicStream();
 
       this.callbacks.onStatusChange?.("Listening...");
+      dbg(`Post-greeting: connected=${this._isConnected} shouldRestart=${this.shouldRestart} pipeline=${this.pipelineState}`);
       if (this._isConnected && this.shouldRestart) {
+        dbg("Starting first recording chunk after greeting");
         this.startRecordingChunk();
+      } else {
+        dbg("⚠️ NOT starting recording — conditions not met!");
       }
     }
   }

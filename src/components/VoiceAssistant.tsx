@@ -146,6 +146,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
 
         const voiceCallbacks = {
           onOpen: async () => {
+            console.log("[voice] onOpen fired");
             setIsActive(true);
             setIsConnecting(false);
             setIsListening(true);
@@ -156,6 +157,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             try {
               if (agentRef.current?.isActive) {
                 setStatus("Getting greeting...");
+                console.log("[voice] Fetching greeting from agent...");
                 const greeting = await agentRef.current.sendMessage("Hello");
                 console.log("[voice] Greeting from agent:", greeting.substring(0, 80));
 
@@ -163,7 +165,9 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                 if (!agentRef.current?.isActive) {
                   console.log("[voice] Session ended during greeting fetch, skipping");
                 } else if (useNativeRef.current) {
+                  console.log("[voice] Sending greeting to native voice service...");
                   await nativeRef.current?.sendGreeting(greeting);
+                  console.log("[voice] sendGreeting() returned — recording should be active now");
                 } else {
                   await geminiRef.current?.sendGreeting(greeting);
                 }
@@ -172,6 +176,11 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             } catch (err) {
               console.warn("[voice] Greeting failed (non-fatal):", err);
               setStatus("Listening...");
+              // CRITICAL: If greeting fails, still start recording!
+              if (useNativeRef.current && nativeRef.current) {
+                console.log("[voice] Greeting failed — starting recording anyway");
+                await nativeRef.current.sendGreeting("");
+              }
             }
           },
           onClose: () => {
