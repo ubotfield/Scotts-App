@@ -672,7 +672,12 @@ export class NativeVoiceService {
       dbg(`STT response: ${res.status} in ${sttMs}ms`);
 
       if (!res.ok) {
-        dbg(`⚠️ STT failed HTTP ${res.status}`);
+        let errDetail = "";
+        try {
+          const errData = await res.json();
+          errDetail = JSON.stringify(errData).substring(0, 200);
+        } catch { errDetail = "no body"; }
+        dbg(`⚠️ STT failed ${res.status}: ${errDetail}`);
         this.pipelineState = "idle";
         this.scheduleNextChunk();
         return;

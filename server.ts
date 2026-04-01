@@ -464,7 +464,12 @@ app.post("/api/stt", async (req, res) => {
     if (!apiRes.ok) {
       const errText = await apiRes.text();
       console.error("[stt] Gemini API failed:", apiRes.status, errText);
-      return res.status(502).json({ error: "STT failed" });
+      return res.status(502).json({
+        error: "STT failed",
+        geminiStatus: apiRes.status,
+        detail: errText.substring(0, 500),
+        keyPrefix: GEMINI_API_KEY.substring(0, 8) + "...",
+      });
     }
 
     const data = await apiRes.json();
